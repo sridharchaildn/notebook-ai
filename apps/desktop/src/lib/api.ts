@@ -9,6 +9,7 @@ import type {
 
 const LOCAL_BASE_URL = import.meta.env.VITE_LOCAL_API_URL ?? 'http://127.0.0.1:8787';
 const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? 'http://127.0.0.1:8790';
+const CLOUD_USER_ID = import.meta.env.VITE_CLOUD_USER_ID ?? 'local-dev-user';
 
 export interface SaveNoteInput {
   id: string;
@@ -59,7 +60,7 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
         return (await res.json()) as ProviderConnection[];
       })
       .catch(() => [] as ProviderConnection[]),
-    fetch(`${CLOUD_BASE_URL}/providers/status?user_id=local-dev-user`)
+    fetch(`${CLOUD_BASE_URL}/providers/status?user_id=${encodeURIComponent(CLOUD_USER_ID)}`)
       .then(async (res) => {
         if (!res.ok) return [] as ProviderConnection[];
         return (await res.json()) as ProviderConnection[];
@@ -91,7 +92,7 @@ export async function storeByok(provider: ProviderId, apiKey: string): Promise<v
   const res = await fetch(`${CLOUD_BASE_URL}/providers/byok`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, api_key: apiKey, user_id: 'local-dev-user' }),
+    body: JSON.stringify({ provider, api_key: apiKey, user_id: CLOUD_USER_ID }),
   });
 
   if (!res.ok) {
@@ -106,8 +107,40 @@ export async function storeByok(provider: ProviderId, apiKey: string): Promise<v
 }
 
 export function openOpenAIOAuth(): void {
-  const url = `${CLOUD_BASE_URL}/providers/openai/oauth/start?user_id=local-dev-user`;
+  const url = `${CLOUD_BASE_URL}/providers/openai/oauth/start?user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
   void window.notebookDesktop.openExternal(url);
+}
+
+export async function disconnectProvider(provider: ProviderId): Promise<void> {
+  const res = await fetch(
+    `${CLOUD_BASE_URL}/providers/${encodeURIComponent(provider)}?user_id=${encodeURIComponent(CLOUD_USER_ID)}`,
+    { method: 'DELETE' },
+  );
+
+  if (!res.ok) {
+    let msg = 'Unable to disconnect provider.';
+    try {
+      const errBody = (await res.json()) as { detail?: string | string[] };
+      const d = errBody.detail;
+      if (typeof d === 'string') {
+        msg = d;
+      } else if (Array.isArray(d) && d.length > 0) {
+        const first = d[0] as { msg?: string };
+        if (typeof first.msg === 'string') {
+          msg = first.msg;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+
+  await fetch(`${LOCAL_BASE_URL}/providers/status/cache`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, via: 'api_key', connected: false }),
+  });
 }
 
 export async function streamTransform(
@@ -163,13 +196,25 @@ export async function streamTransform(
 
 export type TranscriptionEngine = 'whisper' | 'llm';
 
+function audioExtensionFromMimeType(mimeType: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('webm')) return 'webm';
+  if (normalized.includes('mpeg') || normalized.includes('mp3')) return 'mp3';
+  if (normalized.includes('wav')) return 'wav';
+  if (normalized.includes('x-m4a') || normalized.includes('m4a')) return 'm4a';
+  if (normalized.includes('mp4')) return 'mp4';
+  if (normalized.includes('flac')) return 'flac';
+  return 'webm';
+}
+
 export async function transcribeAudioChunk(
   chunk: Blob,
   provider: ProviderId = 'openai',
   engine: TranscriptionEngine = 'whisper',
 ): Promise<TranscriptionChunkResponse> {
   const formData = new FormData();
-  formData.append('file', chunk, `chunk-${Date.now()}.webm`);
+  const extension = audioExtensionFromMimeType(chunk.type);
+  formData.append('file', chunk, `chunk-${Date.now()}.${extension}`);
   formData.append('provider', provider);
   formData.append('transcription_mode', engine);
 

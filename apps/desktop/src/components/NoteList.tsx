@@ -1,5 +1,5 @@
 import type { NoteDocument } from '@notebook-ai/contracts';
-import { Search, SquarePen } from 'lucide-react';
+import { HelpCircle, PanelLeftClose, Search, Settings, SquarePen } from 'lucide-react';
 
 interface Props {
   notes: NoteDocument[];
@@ -8,26 +8,36 @@ interface Props {
   onSearchChange: (value: string) => void;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onOpenSettings: () => void;
+  onCollapse: () => void;
 }
 
-export function NoteList({ notes, selectedId, search, onSearchChange, onSelect, onCreate }: Props) {
+export function NoteList({ notes, selectedId, search, onSearchChange, onSelect, onCreate, onOpenSettings, onCollapse }: Props) {
   return (
     <aside className="note-list">
       <div className="note-list__topbar">
         <h1>Notebook AI</h1>
-        <button type="button" className="ghost-btn" onClick={onCreate}>
-          <SquarePen size={16} />
-          New
-        </button>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button type="button" className="ghost-btn" onClick={onCollapse} aria-label="Collapse sidebar">
+            <PanelLeftClose size={16} />
+          </button>
+        </div>
       </div>
 
       <div className="search-wrap">
-        <Search size={16} />
+        <Search size={16} className="muted" />
         <input
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Search notes"
+          placeholder="Search notes..."
         />
+      </div>
+
+      <div style={{ padding: '0 12px 8px' }}>
+        <button type="button" className="solid-btn" onClick={onCreate} style={{ width: '100%', justifyContent: 'center' }}>
+          <SquarePen size={14} />
+          New Note
+        </button>
       </div>
 
       <div className="note-list__items">
@@ -48,10 +58,28 @@ export function NoteList({ notes, selectedId, search, onSearchChange, onSelect, 
                   {new Date(note.frontmatter.updated_at).toLocaleString()}
                 </span>
                 <p className="note-row__snippet">{note.body.slice(0, 92) || 'Start writing...'}</p>
+                {note.frontmatter.tags.length > 0 && (
+                  <div className="note-row__tags">
+                    {note.frontmatter.tags.slice(0, 3).map((tag) => (
+                      <span key={tag} className="tag-pill">{tag}</span>
+                    ))}
+                  </div>
+                )}
               </button>
             );
           })
         )}
+      </div>
+
+      <div className="note-list__footer">
+        <button type="button" className="footer-btn" onClick={onOpenSettings}>
+          <Settings size={16} />
+          Settings
+        </button>
+        <button type="button" className="footer-btn" onClick={() => window.open('https://github.com', '_blank')}>
+          <HelpCircle size={16} />
+          Help
+        </button>
       </div>
     </aside>
   );

@@ -1,12 +1,14 @@
-import type { NoteDocument } from '@notebook-ai/contracts';
+import type { NoteDocument, ProviderId } from '@notebook-ai/contracts';
+import { ChevronRight, PanelLeftClose, PanelRightClose, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AIActionPanel } from './components/AIActionPanel';
 import { NoteList } from './components/NoteList';
-import { ProviderStatusCard } from './components/ProviderStatusCard';
-import { ThemeToggle } from './components/ThemeToggle';
+import { SettingsModal } from './components/SettingsModal';
+import { SplashScreen } from './components/SplashScreen';
 import { TranscriptionPanel, type CaptureMode } from './components/TranscriptionPanel';
 import {
   createNote,
+  disconnectProvider,
   fetchNotes,
   fetchProviderStatus,
   openOpenAIOAuth,
@@ -57,9 +59,16 @@ export default function App() {
   >([]);
   const [byokProvider, setByokProvider] = useState<'openai' | 'openrouter'>('openai');
   const [byokValue, setByokValue] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showSplash, setShowSplash] = useState(() => {
+    return !localStorage.getItem('notebook_has_visited');
+  });
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [aiPanelOpen, setAiPanelOpen] = useState(true);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [byokSubmitting, setByokSubmitting] = useState(false);
+  const [providerDisconnecting, setProviderDisconnecting] = useState<ProviderId | null>(null);
   const [aiOutput, setAiOutput] = useState('');
   const [message, setMessage] = useState('Ready');
   const [recording, setRecording] = useState(false);
@@ -70,10 +79,8 @@ export default function App() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const pendingChunksRef = useRef(0);
-  const transcriptionQueueRef = useRef<Promise<void>>(Promise.resolve());
-  /** LLM mode buffers blobs and transcribes once on stop (timeslice chunks are not valid standalone WebM). */
-  const llmAudioChunksRef = useRef<Blob[]>([]);
+  /** Buffered recorder chunks; merged and transcribed once on stop as a complete audio file. */
+  const recordedAudioChunksRef = useRef<Blob[]>([]);
   const transcriptionEngineSessionRef = useRef<TranscriptionEngine>('whisper');
 
   useEffect(() => {
@@ -244,6 +251,27 @@ export default function App() {
     }
   }
 
+  async function handleDisconnectProvider(provider: ProviderId) {
+    setProviderDisconnecting(provider);
+    try {
+      await disconnectProvider(provider);
+      const statuses = await fetchProviderStatus();
+      setProviders(
+        statuses.map((entry) => ({
+          provider: entry.provider,
+          connected: entry.connected,
+          via: entry.via,
+          last_updated_at: entry.last_updated_at,
+        })),
+      );
+      setMessage(`Disconnected ${provider}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to disconnect provider');
+    } finally {
+      setProviderDisconnecting(null);
+    }
+  }
+
   function stopCaptureTracks() {
     for (const track of captureStreamRef.current?.getTracks() ?? []) {
       track.stop();
@@ -266,8 +294,7 @@ export default function App() {
 
   function stopRecording() {
     const recorder = recorderRef.current;
-    const isLlmSession = transcriptionEngineSessionRef.current === 'llm';
-    if (recorder && recorder.state === 'recording' && !isLlmSession) {
+    if (recorder && recorder.state === 'recording') {
       try {
         recorder.requestData();
       } catch {
@@ -279,9 +306,7 @@ export default function App() {
     }
     stopCaptureTracks();
     setRecording(false);
-    if (transcriptionEngineSessionRef.current !== 'llm') {
-      setTranscriptionStatus('Capture stopped');
-    }
+    setTranscriptionStatus('Capture stopped');
   }
 
   function buildAudioRecorder(inputStream: MediaStream): MediaRecorder {
@@ -306,7 +331,7 @@ export default function App() {
 
     recorderRef.current = recorder;
     transcriptionEngineSessionRef.current = transcriptionEngine;
-    llmAudioChunksRef.current = [];
+    recordedAudioChunksRef.current = [];
 
     const transcriptTitle = `Transcript ${new Date().toLocaleTimeString()}`;
     const created = await createNote({
@@ -319,8 +344,6 @@ export default function App() {
     setTitle(created.frontmatter.title);
     setBody('');
     setTags(created.frontmatter.tags.join(', '));
-    pendingChunksRef.current = 0;
-    transcriptionQueueRef.current = Promise.resolve();
 
     setRecording(true);
     setTranscriptionStatus(listeningStatus);
@@ -335,13 +358,13 @@ export default function App() {
     if (transcriptionEngine === 'llm') {
       recorder.ondataavailable = (event) => {
         if (!event.data || event.data.size === 0) return;
-        llmAudioChunksRef.current.push(event.data);
+        recordedAudioChunksRef.current.push(event.data);
       };
 
       recorder.onstop = () => {
         setRecording(false);
-        const chunks = llmAudioChunksRef.current;
-        llmAudioChunksRef.current = [];
+        const chunks = recordedAudioChunksRef.current;
+        recordedAudioChunksRef.current = [];
         const mimeType = recorder.mimeType || 'audio/webm';
         const merged =
           chunks.length === 1 ? chunks[0]! : new Blob(chunks, { type: mimeType });
@@ -379,34 +402,46 @@ export default function App() {
     } else {
       recorder.ondataavailable = (event) => {
         if (!event.data || event.data.size === 0) return;
-        pendingChunksRef.current += 1;
-        setTranscriptionBusy(true);
-
-        transcriptionQueueRef.current = transcriptionQueueRef.current
-          .then(async () => {
-            const result = await transcribeAudioChunk(event.data, 'openai', 'whisper');
-            if (result.text.trim()) {
-              onChunk(result.text);
-              setTranscriptionStatus(`Transcribing with ${result.model}...`);
-            } else if (result.detail) {
-              setTranscriptionStatus(result.detail);
-            }
-          })
-          .catch((error: unknown) => {
-            setTranscriptionStatus(
-              error instanceof Error ? error.message : 'Transcription failed for one chunk.',
-            );
-          })
-          .finally(() => {
-            pendingChunksRef.current -= 1;
-            if (pendingChunksRef.current <= 0) {
-              setTranscriptionBusy(false);
-            }
-          });
+        recordedAudioChunksRef.current.push(event.data);
       };
 
       recorder.onstop = () => {
         setRecording(false);
+        const chunks = recordedAudioChunksRef.current;
+        recordedAudioChunksRef.current = [];
+        const mimeType = recorder.mimeType || 'audio/webm';
+        const merged =
+          chunks.length === 1 ? chunks[0]! : new Blob(chunks, { type: mimeType });
+
+        if (merged.size === 0) {
+          setTranscriptionStatus('No audio captured.');
+          return;
+        }
+
+        setTranscriptionBusy(true);
+        setTranscriptionStatus('Transcribing final recording (Whisper)...');
+
+        void transcribeAudioChunk(merged, 'openai', 'whisper')
+          .then((result) => {
+            if (result.text.trim()) {
+              onChunk(result.text);
+              setTranscriptionStatus(
+                `Done (${result.provider} / ${result.model}). Capture stopped.`,
+              );
+            } else if (result.detail) {
+              setTranscriptionStatus(result.detail);
+            } else {
+              setTranscriptionStatus('Whisper returned no text for this recording.');
+            }
+          })
+          .catch((error: unknown) => {
+            setTranscriptionStatus(
+              error instanceof Error ? error.message : 'Whisper transcription failed.',
+            );
+          })
+          .finally(() => {
+            setTranscriptionBusy(false);
+          });
       };
     }
 
@@ -422,11 +457,7 @@ export default function App() {
       micTrack?.addEventListener('ended', endOnStop);
     }
 
-    if (transcriptionEngine === 'llm') {
-      recorder.start();
-    } else {
-      recorder.start(1800);
-    }
+    recorder.start();
   }
 
   async function startRecording(mode: CaptureMode, transcriptionEngine: TranscriptionEngine) {
@@ -537,22 +568,52 @@ export default function App() {
     };
   }, []);
 
-  return (
-    <main className="app-shell">
-      <div className="ambient-bg" />
-      <NoteList
-        notes={notes}
-        selectedId={selectedId}
-        search={search}
-        onSearchChange={(value) => {
-          void handleSearchChange(value);
-        }}
-        onSelect={setSelectedId}
-        onCreate={() => {
-          void handleCreateNote();
+  if (showSplash) {
+    return (
+      <SplashScreen
+        onLogin={() => {
+          localStorage.setItem('notebook_has_visited', 'true');
+          setShowSplash(false);
         }}
       />
+    );
+  }
 
+  const gridCols = [
+    sidebarOpen ? '280px' : '48px',
+    '1fr',
+    aiPanelOpen ? '340px' : '48px',
+  ].join(' ');
+
+  return (
+    <main className="app-shell" style={{ gridTemplateColumns: gridCols }}>
+      <div className="ambient-bg" />
+
+      {/* Sidebar */}
+      {sidebarOpen ? (
+        <NoteList
+          notes={notes}
+          selectedId={selectedId}
+          search={search}
+          onSearchChange={(value) => {
+            void handleSearchChange(value);
+          }}
+          onSelect={setSelectedId}
+          onCreate={() => {
+            void handleCreateNote();
+          }}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onCollapse={() => setSidebarOpen(false)}
+        />
+      ) : (
+        <div className="collapsed-sidebar">
+          <button type="button" className="collapse-toggle" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar">
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      )}
+
+      {/* Editor */}
       <section className="editor-panel">
         <header className="editor-header">
           <div className="title-wrap">
@@ -572,7 +633,6 @@ export default function App() {
 
           <div className="header-right">
             <span className="status-pill">{saving ? 'Saving...' : message}</span>
-            <ThemeToggle theme={theme} onChange={setTheme} />
           </div>
         </header>
 
@@ -596,22 +656,45 @@ export default function App() {
         />
       </section>
 
-      <aside className="right-rail">
-        <ProviderStatusCard
-          providers={providers}
-          byokProvider={byokProvider}
-          byokValue={byokValue}
-          byokSubmitting={byokSubmitting}
-          onByokProviderChange={setByokProvider}
-          onByokValueChange={setByokValue}
-          onSaveByok={() => {
-            void handleSaveByok();
-          }}
-          onOpenOAuth={openOpenAIOAuth}
-        />
+      {/* AI Copilot - Right Rail */}
+      {aiPanelOpen ? (
+        <aside className="right-rail">
+          <div className="right-rail__header">
+            <button type="button" className="collapse-toggle" onClick={() => setAiPanelOpen(false)} aria-label="Collapse AI panel">
+              <PanelRightClose size={16} />
+            </button>
+          </div>
+          <AIActionPanel output={aiOutput} running={busy} onRun={(action) => void runTransform(action)} />
+        </aside>
+      ) : (
+        <div className="collapsed-rail">
+          <button type="button" className="collapse-toggle vertical" onClick={() => setAiPanelOpen(true)} aria-label="Expand AI panel">
+            <Sparkles size={16} />
+            <span>AI</span>
+          </button>
+        </div>
+      )}
 
-        <AIActionPanel output={aiOutput} running={busy} onRun={(action) => void runTransform(action)} />
-      </aside>
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        providers={providers}
+        byokProvider={byokProvider}
+        byokValue={byokValue}
+        byokSubmitting={byokSubmitting}
+        onByokProviderChange={setByokProvider}
+        onByokValueChange={setByokValue}
+        onSaveByok={() => {
+          void handleSaveByok();
+        }}
+        onOpenOAuth={openOpenAIOAuth}
+        disconnectingProvider={providerDisconnecting}
+        onDisconnectProvider={(p) => {
+          void handleDisconnectProvider(p);
+        }}
+        theme={theme}
+        onThemeChange={setTheme}
+      />
     </main>
   );
 }
