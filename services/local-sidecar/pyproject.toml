@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notebook-ai-local-sidecar"
+version = "0.1.0"
+description = "Local FastAPI sidecar for Notebook AI"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.8.0",
+  "python-dotenv>=1.0.1",
+  "pyyaml>=6.0.2",
+  "httpx>=0.28.1",
+  "python-multipart>=0.0.20",
+  "langchain>=0.3.20",
+  "langchain-openai>=0.3.7"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.4",
+  "pytest-asyncio>=0.25.3",
+  "httpx>=0.28.1"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"

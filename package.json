@@ -1,0 +1,18 @@
+{
+  "name": "notebook-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop-first AI note taker with Electron, FastAPI, and LangChain",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:desktop": "npm --workspace @notebook-ai/desktop run dev",
+    "build:desktop": "npm --workspace @notebook-ai/desktop run build",
+    "test:desktop": "npm --workspace @notebook-ai/desktop run test"
+  },
+  "engines": {
+    "node": ">=20.10.0"
+  }
+}
