@@ -8,6 +8,14 @@ from pydantic import BaseModel, Field
 ProviderId = Literal["openai", "openrouter"]
 TransformType = Literal["summarize", "rewrite", "extract_action_items"]
 ToneType = Literal["concise", "professional", "friendly", "actionable"]
+InterviewRole = Literal["interviewer", "interviewee"]
+TranscriptionErrorCode = Literal[
+    "invalid_audio_format",
+    "auth_or_quota",
+    "network_error",
+    "provider_http_error",
+    "none",
+]
 
 
 class NoteFrontmatter(BaseModel):
@@ -50,6 +58,39 @@ class AITransformRequest(BaseModel):
     model: str | None = None
 
 
+class InterviewAssistRequest(BaseModel):
+    transcript: str
+    provider: ProviderId | None = None
+    model: str | None = None
+
+
+class InterviewTurn(BaseModel):
+    id: str
+    role: InterviewRole
+    text: str
+
+
+class InterviewTurnsRequest(BaseModel):
+    transcript: str
+    previous_turns: list[InterviewTurn] = Field(default_factory=list)
+    provider: ProviderId | None = None
+    model: str | None = None
+
+
+class InterviewTurnsResponse(BaseModel):
+    turns: list[InterviewTurn] = Field(default_factory=list)
+    latest_interviewer_turn_id: str | None = None
+    transcript_digest: str
+
+
+class InterviewCoachRequest(BaseModel):
+    latest_interviewer_turn: InterviewTurn
+    latest_interviewee_turn: InterviewTurn | None = None
+    brevity: Literal["short", "one_liner"] = "short"
+    provider: ProviderId | None = None
+    model: str | None = None
+
+
 class ProviderConnection(BaseModel):
     provider: ProviderId
     connected: bool
@@ -72,3 +113,7 @@ class TranscriptionChunkResponse(BaseModel):
     provider: ProviderId
     model: str
     detail: str | None = None
+    ok: bool = True
+    error_code: TranscriptionErrorCode = "none"
+    recoverable: bool = False
+    segment_id: int | None = None

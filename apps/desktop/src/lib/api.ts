@@ -1,6 +1,10 @@
 import type {
   AITransformRequest,
   AITransformType,
+  InterviewCoachRequest,
+  InterviewAssistRequest,
+  InterviewTurnsRequest,
+  InterviewTurnsResponse,
   NoteDocument,
   ProviderConnection,
   ProviderId,
@@ -194,6 +198,119 @@ export async function streamTransform(
   }
 }
 
+export async function streamInterviewAssist(
+  payload: InterviewAssistRequest,
+  onToken: (chunk: string) => void,
+): Promise<void> {
+  // Deprecated compatibility path. Prefer fetchInterviewTurns + streamInterviewCoach.
+  const res = await fetch(`${LOCAL_BASE_URL}/ai/interview/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok || !res.body) {
+    throw new Error('Unable to stream interview guidance.');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const eventLine = line
+        .split('\n')
+        .find((chunk) => chunk.startsWith('data:'));
+      if (!eventLine) continue;
+
+      const payloadEvent = JSON.parse(eventLine.replace(/^data:\s*/, '')) as {
+        event: 'token' | 'complete' | 'error';
+        data: string;
+      };
+
+      if (payloadEvent.event === 'token') {
+        onToken(payloadEvent.data);
+      }
+
+      if (payloadEvent.event === 'error') {
+        throw new Error(payloadEvent.data);
+      }
+    }
+  }
+}
+
+export async function fetchInterviewTurns(
+  payload: InterviewTurnsRequest,
+): Promise<InterviewTurnsResponse> {
+  const res = await fetch(`${LOCAL_BASE_URL}/ai/interview/turns`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    throw new Error('Unable to extract interview turns.');
+  }
+
+  return (await res.json()) as InterviewTurnsResponse;
+}
+
+export async function streamInterviewCoach(
+  payload: InterviewCoachRequest,
+  onToken: (chunk: string) => void,
+): Promise<void> {
+  const res = await fetch(`${LOCAL_BASE_URL}/ai/interview/coach/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok || !res.body) {
+    throw new Error('Unable to stream interview coach response.');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const eventLine = line
+        .split('\n')
+        .find((chunk) => chunk.startsWith('data:'));
+      if (!eventLine) continue;
+
+      const payloadEvent = JSON.parse(eventLine.replace(/^data:\s*/, '')) as {
+        event: 'token' | 'complete' | 'error';
+        data: string;
+      };
+
+      if (payloadEvent.event === 'token') {
+        onToken(payloadEvent.data);
+      }
+
+      if (payloadEvent.event === 'error') {
+        throw new Error(payloadEvent.data);
+      }
+    }
+  }
+}
+
 export type TranscriptionEngine = 'whisper' | 'llm';
 
 function audioExtensionFromMimeType(mimeType: string): string {
@@ -211,12 +328,16 @@ export async function transcribeAudioChunk(
   chunk: Blob,
   provider: ProviderId = 'openai',
   engine: TranscriptionEngine = 'whisper',
+  segmentId?: number,
 ): Promise<TranscriptionChunkResponse> {
   const formData = new FormData();
   const extension = audioExtensionFromMimeType(chunk.type);
   formData.append('file', chunk, `chunk-${Date.now()}.${extension}`);
   formData.append('provider', provider);
   formData.append('transcription_mode', engine);
+  if (typeof segmentId === 'number') {
+    formData.append('segment_id', String(segmentId));
+  }
 
   const res = await fetch(`${LOCAL_BASE_URL}/transcription/chunk`, {
     method: 'POST',

@@ -12,6 +12,10 @@ from .logging_setup import configure_sidecar_logging
 from .models import (
     AITransformRequest,
     HealthResponse,
+    InterviewAssistRequest,
+    InterviewCoachRequest,
+    InterviewTurnsRequest,
+    InterviewTurnsResponse,
     NoteCreateRequest,
     NoteDocument,
     NoteUpdateRequest,
@@ -83,11 +87,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.post("/ai/interview/turns", response_model=InterviewTurnsResponse)
+    async def interview_turns(payload: InterviewTurnsRequest) -> InterviewTurnsResponse:
+        return await ai_service.extract_interview_turns(payload)
+
+    @app.post("/ai/interview/coach/stream")
+    async def stream_interview_coach(payload: InterviewCoachRequest) -> StreamingResponse:
+        async def stream() -> AsyncIterator[str]:
+            try:
+                async for token in ai_service.stream_interview_coach(payload):
+                    yield _sse_event("token", token)
+                yield _sse_event("complete", "done")
+            except Exception as exc:  # pragma: no cover - defensive path
+                yield _sse_event("error", str(exc))
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+
+    # Deprecated: retained for compatibility while desktop migrates to /ai/interview/turns + /ai/interview/coach/stream.
+    @app.post("/ai/interview/stream")
+    async def stream_interview_assist(payload: InterviewAssistRequest) -> StreamingResponse:
+        async def stream() -> AsyncIterator[str]:
+            try:
+                async for token in ai_service.stream_interview_assist(payload):
+                    yield _sse_event("token", token)
+                yield _sse_event("complete", "done")
+            except Exception as exc:  # pragma: no cover - defensive path
+                yield _sse_event("error", str(exc))
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+
     @app.post("/transcription/chunk", response_model=TranscriptionChunkResponse)
     async def transcribe_chunk(
         file: UploadFile = File(...),
         provider: str = Form(default="openai"),
         transcription_mode: str = Form(default="whisper"),
+        segment_id: int | None = Form(default=None),
     ) -> TranscriptionChunkResponse:
         audio_bytes = await file.read()
         if not audio_bytes:
@@ -96,11 +144,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mode = transcription_mode if transcription_mode in {"whisper", "llm"} else "whisper"
 
         log.info(
-            "POST /transcription/chunk bytes=%s filename=%s provider=%s mode=%s",
+            "POST /transcription/chunk bytes=%s filename=%s provider=%s mode=%s segment_id=%s",
             len(audio_bytes),
             file.filename,
             provider,
             mode,
+            segment_id,
         )
 
         result = await transcription_service.transcribe_chunk(
@@ -109,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content_type=file.content_type or "audio/webm",
             provider=provider,
             transcription_mode=mode,
+            segment_id=segment_id,
         )
 
         d = result.detail
@@ -125,6 +175,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider=out_provider,
             model=result.model,
             detail=result.detail,
+            ok=result.ok,
+            error_code=result.error_code,
+            recoverable=result.recoverable,
+            segment_id=result.segment_id,
         )
 
     @app.get("/providers/status", response_model=list[ProviderConnection])

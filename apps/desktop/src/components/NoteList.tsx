@@ -1,5 +1,5 @@
 import type { NoteDocument } from '@notebook-ai/contracts';
-import { HelpCircle, PanelLeftClose, Search, Settings, SquarePen } from 'lucide-react';
+import { BookOpen, HelpCircle, PanelLeftClose, Search, Settings, SquarePen } from 'lucide-react';
 
 interface Props {
   notes: NoteDocument[];
@@ -9,14 +9,30 @@ interface Props {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onOpenSettings: () => void;
+  onOpenSplash: () => void;
   onCollapse: () => void;
 }
 
-export function NoteList({ notes, selectedId, search, onSearchChange, onSelect, onCreate, onOpenSettings, onCollapse }: Props) {
+export function NoteList({
+  notes,
+  selectedId,
+  search,
+  onSearchChange,
+  onSelect,
+  onCreate,
+  onOpenSettings,
+  onOpenSplash,
+  onCollapse,
+}: Props) {
   return (
     <aside className="note-list">
       <div className="note-list__topbar">
-        <h1>Notebook AI</h1>
+        <button type="button" className="app-brand-btn" onClick={onOpenSplash} aria-label="Open splash screen">
+          <span className="app-brand-icon">
+            <BookOpen size={14} />
+          </span>
+          <span className="app-brand-label">Notebook AI</span>
+        </button>
         <div style={{ display: 'flex', gap: '6px' }}>
           <button type="button" className="ghost-btn" onClick={onCollapse} aria-label="Collapse sidebar">
             <PanelLeftClose size={16} />

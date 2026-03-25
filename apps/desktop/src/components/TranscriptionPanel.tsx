@@ -4,11 +4,13 @@ import { useState } from 'react';
 import type { TranscriptionEngine } from '../lib/api';
 
 export type CaptureMode = 'mic' | 'system';
+export type CaptureSessionMode = 'notes' | 'interview_assist';
 export type { TranscriptionEngine };
 
 export interface TranscriptionStartOptions {
   captureMode: CaptureMode;
   engine: TranscriptionEngine;
+  mode: CaptureSessionMode;
 }
 
 interface Props {
@@ -17,6 +19,7 @@ interface Props {
   status: string;
   onStart: (options: TranscriptionStartOptions) => void;
   onStop: () => void;
+  onModeChange?: (mode: CaptureSessionMode) => void;
 }
 
 export function TranscriptionPanel({
@@ -25,9 +28,11 @@ export function TranscriptionPanel({
   status,
   onStart,
   onStop,
+  onModeChange,
 }: Props) {
   const [captureMode, setCaptureMode] = useState<CaptureMode>('mic');
   const [engine, setEngine] = useState<TranscriptionEngine>('whisper');
+  const [mode, setMode] = useState<CaptureSessionMode>('notes');
 
   return (
     <section className="transcription-panel">
@@ -39,6 +44,34 @@ export function TranscriptionPanel({
 
       {/* Two-column controls */}
       <div className="transcription-controls">
+        <div className="transcription-control-group">
+          <div className="transcription-control-label">Mode</div>
+          <div className="transcription-mode-toggle" role="group" aria-label="Capture mode">
+            <button
+              type="button"
+              className={`mode-toggle-btn${mode === 'notes' ? ' active' : ''}`}
+              disabled={recording}
+              onClick={() => {
+                setMode('notes');
+                onModeChange?.('notes');
+              }}
+            >
+              Notes
+            </button>
+            <button
+              type="button"
+              className={`mode-toggle-btn${mode === 'interview_assist' ? ' active' : ''}`}
+              disabled={recording}
+              onClick={() => {
+                setMode('interview_assist');
+                onModeChange?.('interview_assist');
+              }}
+            >
+              Interview Assist
+            </button>
+          </div>
+        </div>
+
         {/* Source selection */}
         <div className="transcription-control-group">
           <div className="transcription-control-label">Source</div>
@@ -95,16 +128,16 @@ export function TranscriptionPanel({
         {recording ? (
           <button type="button" className="solid-btn danger" onClick={onStop}>
             <CircleStop size={15} />
-            Stop Recording
+            Stop
           </button>
         ) : (
           <button
             type="button"
             className="solid-btn"
-            onClick={() => onStart({ captureMode, engine })}
+            onClick={() => onStart({ captureMode, engine, mode })}
           >
             <Mic size={15} />
-            Start Recording
+            {mode === 'interview_assist' ? 'Start Interview Assist' : 'Start Recording'}
           </button>
         )}
 

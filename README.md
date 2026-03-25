@@ -30,8 +30,9 @@ Desktop-first AI note taker with local markdown storage, Electron UX, and FastAP
    - `cd services/local-sidecar && python3.11 -m venv .venv && source .venv/bin/activate && pip install -e .'[dev]'`
    - `cd services/cloud-api && python3.11 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]'`
 3. Run services:
-   - Local sidecar: `uvicorn app.main:app --reload --port 8787`
-   - Cloud API: `uvicorn app.main:app --reload --port 8790`
+   - Local sidecar (recommended for live interviews): `uvicorn app.main:app --port 8787`
+   - Cloud API: `uvicorn app.main:app --port 8790`
+   - Dev-only hot reload variants: add `--reload` when you are not running long live capture sessions.
 4. Run desktop app:
    - `npm run dev:desktop`
 

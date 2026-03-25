@@ -59,3 +59,72 @@ def test_stream_transform_sse(tmp_path):
     assert "data:" in response.text
     assert "token" in response.text
     assert "complete" in response.text
+
+
+def test_interview_turns_and_coach_stream(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+    )
+    client = TestClient(create_app(settings))
+
+    turns_res = client.post(
+        "/ai/interview/turns",
+        json={
+            "transcript": "Interviewer: What is JavaScript? Interviewee: JavaScript is a scripting language.",
+            "previous_turns": [],
+            "provider": "openai",
+        },
+    )
+    assert turns_res.status_code == 200
+    turns_payload = turns_res.json()
+    assert "turns" in turns_payload
+    assert len(turns_payload["turns"]) >= 1
+    assert "transcript_digest" in turns_payload
+
+    interviewer_turn = next((t for t in turns_payload["turns"] if t["role"] == "interviewer"), None)
+    assert interviewer_turn is not None
+
+    coach_res = client.post(
+        "/ai/interview/coach/stream",
+        json={
+            "latest_interviewer_turn": interviewer_turn,
+            "brevity": "short",
+            "provider": "openai",
+        },
+    )
+    assert coach_res.status_code == 200
+    assert "token" in coach_res.text
+    assert "complete" in coach_res.text
+
+
+def test_transcription_chunk_returns_structured_error_fields(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        openai_api_key=None,
+        cloud_api_url="http://127.0.0.1:9",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/transcription/chunk",
+        data={
+            "provider": "openai",
+            "transcription_mode": "whisper",
+            "segment_id": "7",
+        },
+        files={"file": ("chunk.webm", b"fake audio bytes", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error_code"] in {
+        "auth_or_quota",
+        "provider_http_error",
+        "network_error",
+        "invalid_audio_format",
+    }
+    assert "recoverable" in payload
+    assert payload["segment_id"] == 7

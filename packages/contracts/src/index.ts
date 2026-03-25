@@ -38,10 +38,61 @@ export interface AITransformStreamEvent {
   data: string;
 }
 
+export type InterviewRole = 'interviewer' | 'interviewee';
+
+export interface InterviewTurn {
+  id: string;
+  role: InterviewRole;
+  text: string;
+}
+
+export interface InterviewTurnsRequest {
+  transcript: string;
+  previous_turns: InterviewTurn[];
+  provider?: ProviderId;
+  model?: string;
+}
+
+export interface InterviewTurnsResponse {
+  turns: InterviewTurn[];
+  latest_interviewer_turn_id?: string | null;
+  transcript_digest: string;
+}
+
+export interface InterviewCoachRequest {
+  latest_interviewer_turn: InterviewTurn;
+  latest_interviewee_turn?: InterviewTurn | null;
+  brevity?: 'short' | 'one_liner';
+  provider?: ProviderId;
+  model?: string;
+}
+
+export interface InterviewCoachStreamEvent {
+  event: 'token' | 'complete' | 'error';
+  data: string;
+}
+
+/** @deprecated Use InterviewTurnsRequest + InterviewCoachRequest. */
+export interface InterviewAssistRequest {
+  transcript: string;
+  provider?: ProviderId;
+  model?: string;
+}
+
+/** @deprecated Use InterviewCoachStreamEvent. */
+export interface InterviewAssistStreamEvent {
+  event: 'token' | 'complete' | 'error';
+  data: string;
+}
+
 export interface TranscriptionChunkResponse {
   text: string;
   provider: ProviderId;
   model: string;
   /** Hint when text is empty (e.g. missing API key). */
   detail?: string | null;
+  ok: boolean;
+  error_code?: 'invalid_audio_format' | 'auth_or_quota' | 'network_error' | 'provider_http_error' | 'none';
+  recoverable?: boolean;
+  segment_id?: number | null;
 }

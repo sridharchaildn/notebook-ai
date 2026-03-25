@@ -29,6 +29,10 @@ class TranscriptionResult:
     provider: str
     model: str
     detail: str | None = None
+    ok: bool = True
+    error_code: str = "none"
+    recoverable: bool = False
+    segment_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -50,6 +54,7 @@ class TranscriptionService:
         content_type: str,
         provider: str = "openai",
         transcription_mode: str = "whisper",
+        segment_id: int | None = None,
     ) -> TranscriptionResult:
         log.debug(
             "transcribe_chunk: bytes=%s filename=%s content_type=%s provider=%s mode=%s",
@@ -61,18 +66,22 @@ class TranscriptionService:
         )
 
         if transcription_mode == "llm":
-            return await self._transcribe_via_llm_chat(
+            result = await self._transcribe_via_llm_chat(
                 audio_bytes=audio_bytes,
                 filename=filename,
                 content_type=content_type,
             )
+            result.segment_id = segment_id
+            return result
 
-        return await self._transcribe_whisper_api(
+        result = await self._transcribe_whisper_api(
             audio_bytes=audio_bytes,
             filename=filename,
             content_type=content_type,
             provider=provider,
         )
+        result.segment_id = segment_id
+        return result
 
     async def _transcribe_via_llm_chat(
         self,
@@ -110,6 +119,9 @@ class TranscriptionService:
                 provider="openrouter",
                 model=self.settings.transcription_llm_openrouter_model,
                 detail=msg,
+                ok=False,
+                error_code="auth_or_quota",
+                recoverable=False,
             )
 
         prepared = _prepare_llm_audio_for_openai_input(audio_bytes, filename, content_type)
@@ -119,6 +131,9 @@ class TranscriptionService:
                 provider=used_provider,
                 model=model,
                 detail=prepared.error,
+                ok=False,
+                error_code="invalid_audio_format",
+                recoverable=True,
             )
 
         b64 = base64.standard_b64encode(prepared.data).decode("ascii")
@@ -168,6 +183,9 @@ class TranscriptionService:
                 provider=used_provider,
                 model=model,
                 detail=f"LLM transcription request failed: {exc}",
+                ok=False,
+                error_code="network_error",
+                recoverable=True,
             )
 
         if response.status_code >= 400:
@@ -186,6 +204,9 @@ class TranscriptionService:
                 provider=used_provider,
                 model=model,
                 detail=detail,
+                ok=False,
+                error_code="provider_http_error",
+                recoverable=response.status_code >= 500 or response.status_code == 429,
             )
 
         try:
@@ -196,6 +217,9 @@ class TranscriptionService:
                 provider=used_provider,
                 model=model,
                 detail="LLM transcription: invalid JSON response.",
+                ok=False,
+                error_code="provider_http_error",
+                recoverable=True,
             )
 
         choices = body.get("choices")
@@ -205,6 +229,9 @@ class TranscriptionService:
                 provider=used_provider,
                 model=model,
                 detail="LLM transcription: empty choices in response.",
+                ok=False,
+                error_code="provider_http_error",
+                recoverable=True,
             )
 
         message = choices[0].get("message") if isinstance(choices[0], dict) else None
@@ -214,6 +241,9 @@ class TranscriptionService:
                 provider=used_provider,
                 model=model,
                 detail="LLM transcription: missing message in response.",
+                ok=False,
+                error_code="provider_http_error",
+                recoverable=True,
             )
 
         text = _extract_chat_message_text(message).strip()
@@ -223,6 +253,9 @@ class TranscriptionService:
             provider=used_provider,
             model=model,
             detail=None if text else "LLM returned empty transcript (model may not support this audio format).",
+            ok=True,
+            error_code="none",
+            recoverable=False,
         )
 
     async def _transcribe_whisper_api(
@@ -244,6 +277,9 @@ class TranscriptionService:
                 provider=provider,
                 model=self.settings.openai_transcription_model,
                 detail=msg,
+                ok=False,
+                error_code="provider_http_error",
+                recoverable=False,
             )
 
         api_key = await self._resolve_openai_api_key()
@@ -258,6 +294,9 @@ class TranscriptionService:
                 provider="openai",
                 model=self.settings.openai_transcription_model,
                 detail=msg,
+                ok=False,
+                error_code="auth_or_quota",
+                recoverable=False,
             )
 
         models_to_try = [
@@ -267,6 +306,8 @@ class TranscriptionService:
         ]
 
         last_error: str | None = None
+        last_error_code = "provider_http_error"
+        last_recoverable = False
         async with httpx.AsyncClient(timeout=30.0) as client:
             for model in models_to_try:
                 try:
@@ -281,6 +322,10 @@ class TranscriptionService:
                     if response.status_code >= 400:
                         body_preview = (response.text or "")[:300]
                         last_error = f"HTTP {response.status_code}: {body_preview}"
+                        last_error_code, last_recoverable = _classify_whisper_http_error(
+                            response.status_code,
+                            body_preview,
+                        )
                         log.warning(
                             "transcribe_whisper: model=%s status=%s body_preview=%s",
                             model,
@@ -301,9 +346,14 @@ class TranscriptionService:
                         provider="openai",
                         model=model,
                         detail=None if text else "OpenAI returned empty text for this audio chunk.",
+                        ok=True,
+                        error_code="none",
+                        recoverable=False,
                     )
                 except httpx.HTTPError as exc:
                     last_error = str(exc)
+                    last_error_code = "network_error"
+                    last_recoverable = True
                     log.warning("transcribe_whisper: model=%s httpx_error=%s", model, exc)
 
         detail = "OpenAI transcription failed for all models."
@@ -315,6 +365,9 @@ class TranscriptionService:
             provider="openai",
             model=self.settings.openai_transcription_model,
             detail=detail,
+            ok=False,
+            error_code=last_error_code,
+            recoverable=last_recoverable,
         )
 
     async def _resolve_openai_api_key(self) -> str | None:
@@ -493,6 +546,25 @@ def _llm_transcription_error_hint(status: int, body_preview: str, model: str) ->
             "Install ffmpeg on the sidecar host so WebM is transcoded automatically, or use Whisper API mode."
         )
     return ""
+
+
+def _classify_whisper_http_error(status: int, body_preview: str) -> tuple[str, bool]:
+    low = body_preview.lower()
+
+    if status in {401, 403, 402, 429}:
+        return "auth_or_quota", False
+
+    if (
+        "invalid file format" in low
+        or "audio file might be corrupted or unsupported" in low
+        or ("param\": \"file\"" in low and "invalid_value" in low)
+    ):
+        return "invalid_audio_format", True
+
+    if status >= 500:
+        return "provider_http_error", True
+
+    return "provider_http_error", False
 
 
 def _guess_audio_format(filename: str, content_type: str) -> str:
