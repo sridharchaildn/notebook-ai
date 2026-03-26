@@ -43,3 +43,29 @@ def test_markdown_frontmatter_roundtrip(tmp_path: Path):
     search = store.list_notes(query="updated")
     assert len(search) == 1
     assert updated.frontmatter.updated_at >= created.frontmatter.created_at
+
+
+def test_folder_crud_and_move(tmp_path: Path):
+    store = NoteStore(tmp_path / "notes")
+    folder = store.create_folder("Interviews")
+    assert folder.name == "Interviews"
+
+    created = store.create_note(
+        NoteCreateRequest(
+            title="Session 1",
+            body="Transcript",
+            tags=["interview"],
+        )
+    )
+
+    moved = store.move_note(created.frontmatter.id, folder.id)
+    assert moved.frontmatter.folder_id == folder.id
+
+    renamed = store.update_folder(folder.id, "Interview Prep")
+    assert renamed.name == "Interview Prep"
+
+    removed = store.delete_folder(folder.id)
+    assert removed is True
+
+    reloaded = store.list_notes()[0]
+    assert reloaded.frontmatter.folder_id is None

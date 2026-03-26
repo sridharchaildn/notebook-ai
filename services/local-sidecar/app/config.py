@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     notes_dir: Path = Path(".notebook-ai/notes")
     profile_path: Path = Path(".notebook-ai/provider_status.json")
+    storage_profile_path: Path = Path(".notebook-ai/storage_profile.json")
+    sync_profile_path: Path = Path(".notebook-ai/sync_profile.json")
 
     default_provider: str = "openai"
     openai_model: str = "gpt-4o-mini"
@@ -33,7 +35,7 @@ class Settings(BaseSettings):
     cloud_user_id: str = "local-dev-user"
     debug: bool = False
 
-    @field_validator("notes_dir", "profile_path", mode="before")
+    @field_validator("notes_dir", "profile_path", "storage_profile_path", "sync_profile_path", mode="before")
     @classmethod
     def expand_path(cls, value: str | Path) -> Path:
         return Path(value).expanduser().resolve()

@@ -90,3 +90,98 @@ def test_auth_session_exchange_dev_fallback(tmp_path):
     payload = response.json()
     assert payload["user_id"] == "dev-user"
     assert isinstance(payload["session_token"], str) and payload["session_token"]
+
+
+def test_desktop_auth_exchange_round_trip(tmp_path):
+    settings = Settings(
+        database_path=tmp_path / "cloud.db",
+        app_jwt_secret="desktop-secret",
+        web_app_url="http://127.0.0.1:3000",
+        desktop_auth_path="/desktop/auth",
+        desktop_callback_scheme="notebook-ai://auth/callback",
+    )
+    client = TestClient(create_app(settings))
+
+    init_res = client.post("/auth/desktop/exchange/init", json={"device_label": "MacBook"})
+    assert init_res.status_code == 200
+    state = init_res.json()["state"]
+    assert state
+    assert "http://127.0.0.1:3000/desktop/auth" in init_res.json()["auth_url"]
+
+    docs_res = client.get("/legal/current")
+    assert docs_res.status_code == 200
+    docs = docs_res.json()["documents"]
+    accept_res = client.post(
+        "/legal/accept",
+        json={
+            "user_id": "desktop-user",
+            "acceptances": [
+                {"type": "privacy_policy", "version": docs[0]["version"]},
+                {"type": "user_agreement", "version": docs[1]["version"]},
+            ],
+        },
+    )
+    assert accept_res.status_code == 200
+
+    complete_web_res = client.post(
+        "/auth/desktop/exchange/complete",
+        json={"state": state, "user_id": "desktop-user"},
+    )
+    assert complete_web_res.status_code == 200
+    code = complete_web_res.json()["code"]
+    assert code
+    assert complete_web_res.json()["deep_link_url"].startswith("notebook-ai://auth/callback?code=")
+
+    complete_desktop_res = client.post(
+        "/auth/desktop/exchange/complete",
+        json={"code": code},
+    )
+    assert complete_desktop_res.status_code == 200
+    assert complete_desktop_res.json()["user_id"] == "desktop-user"
+    assert complete_desktop_res.json()["onboarding_complete"] is True
+    assert isinstance(complete_desktop_res.json()["session_token"], str)
+
+
+def test_legal_storage_and_drive_status(tmp_path):
+    settings = Settings(
+        database_path=tmp_path / "cloud.db",
+        credential_secret="vault-secret",
+        app_jwt_secret="legal-secret",
+    )
+    client = TestClient(create_app(settings))
+
+    legal_current = client.get("/legal/current")
+    assert legal_current.status_code == 200
+    docs = legal_current.json()["documents"]
+    assert len(docs) == 2
+
+    accepted = client.post(
+        "/legal/accept",
+        json={
+            "user_id": "user-a",
+            "acceptances": [
+                {"type": "privacy_policy", "version": docs[0]["version"]},
+                {"type": "user_agreement", "version": docs[1]["version"]},
+            ],
+        },
+    )
+    assert accepted.status_code == 200
+    assert len(accepted.json()) == 2
+
+    pref = client.put(
+        "/settings/storage",
+        json={"user_id": "user-a", "mode": "local_and_drive", "local_root": "/tmp/notebook"},
+    )
+    assert pref.status_code == 200
+    assert pref.json()["mode"] == "local_and_drive"
+
+    drive = client.post(
+        "/integrations/google-drive/byok",
+        json={"user_id": "user-a", "refresh_token": "refresh-123", "folder_id": "folder-1"},
+    )
+    assert drive.status_code == 200
+    assert drive.json()["connected"] is True
+
+    drive_status = client.get("/integrations/google-drive/status", params={"user_id": "user-a"})
+    assert drive_status.status_code == 200
+    assert drive_status.json()["connected"] is True

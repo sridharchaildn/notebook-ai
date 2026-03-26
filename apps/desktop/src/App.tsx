@@ -1,4 +1,11 @@
-import type { InterviewTurn, NoteDocument, ProviderId } from '@notebook-ai/contracts';
+import type {
+  DriveConnectionStatus,
+  InterviewTurn,
+  NoteDocument,
+  ProviderId,
+  StoragePreference,
+  SyncStatus,
+} from '@notebook-ai/contracts';
 import { ChevronRight, PanelLeftClose, PanelRightClose, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { AIActionPanel } from './components/AIActionPanel';
@@ -12,15 +19,25 @@ import {
 } from './components/TranscriptionPanel';
 import {
   createNote,
+  completeDesktopAuth,
   disconnectProvider,
   fetchInterviewTurns,
+  fetchLocalRoot,
   fetchNotes,
+  fetchGoogleDriveStatus,
   fetchProviderStatus,
+  fetchStoragePreference,
+  fetchSyncStatus,
   openOpenAIOAuth,
+  runSyncNow,
+  setLocalRoot,
+  startDesktopAuthFlow,
   storeByok,
+  openGoogleDriveConnect,
   streamInterviewCoach,
   streamTransform,
   transcribeAudioChunk,
+  updateStoragePreference,
   updateNote,
   type TranscriptionEngine,
 } from './lib/api';
@@ -30,6 +47,12 @@ const INTERVIEW_SEGMENT_MS = 8000;
 const INTERVIEW_RECOVERABLE_FAILURE_LIMIT = 2;
 const INTERVIEW_TRANSCRIPT_TAIL_CHARS = 5000;
 const COACH_PLACEHOLDER = 'Waiting for a new interviewer question...';
+const DEFAULT_DRIVE_STATUS: DriveConnectionStatus = {
+  connected: false,
+  folder_name: 'Notebook AI',
+  folder_id: null,
+  last_updated_at: null,
+};
 const INTERVIEW_FILLER_UTTERANCES = new Set([
   'okay',
   'ok',
@@ -84,6 +107,21 @@ export default function App() {
   const [showSplash, setShowSplash] = useState(() => {
     return !localStorage.getItem('notebook_has_visited');
   });
+  const [manualSignInUrl, setManualSignInUrl] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(
+    () => localStorage.getItem('notebook_session_user_id') ?? null,
+  );
+  const [storagePreference, setStoragePreference] = useState<StoragePreference>({
+    mode: 'local',
+    local_root: null,
+  });
+  const [localRootPath, setLocalRootPath] = useState('');
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [driveStatus, setDriveStatus] = useState<DriveConnectionStatus>(DEFAULT_DRIVE_STATUS);
+  const [driveStatusBusy, setDriveStatusBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [aiPanelOpen, setAiPanelOpen] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -102,6 +140,14 @@ export default function App() {
   const [interviewGuidance, setInterviewGuidance] = useState('');
   const [interviewGuidanceBusy, setInterviewGuidanceBusy] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>(() => {
+    return (localStorage.getItem('notebook_transcription_engine') as TranscriptionEngine) || 'whisper';
+  });
+
+  function handleTranscriptionEngineChange(engine: TranscriptionEngine) {
+    setTranscriptionEngine(engine);
+    localStorage.setItem('notebook_transcription_engine', engine);
+  }
   const [isMacPlatform] = useState(() => /mac/i.test(navigator.platform));
   const captureStreamRef = useRef<MediaStream | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
@@ -207,11 +253,27 @@ export default function App() {
   }, [activeSessionMode]);
 
   useEffect(() => {
+    if (!window.notebookDesktop?.onAuthCallback) {
+      return;
+    }
+    const unsubscribe = window.notebookDesktop.onAuthCallback((url) => {
+      void handleDesktopAuthCallback(url);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
     void (async () => {
       try {
-        const [loadedNotes, providerStatuses] = await Promise.all([
+        const [loadedNotes, providerStatuses, pref, localRoot, sync, drive] = await Promise.all([
           fetchNotes(),
           fetchProviderStatus(),
+          fetchStoragePreference().catch(() => ({ mode: 'local', local_root: null } as StoragePreference)),
+          fetchLocalRoot().catch(() => ''),
+          fetchSyncStatus().catch(() => null),
+          fetchGoogleDriveStatus().catch(() => DEFAULT_DRIVE_STATUS),
         ]);
 
         setNotes(loadedNotes);
@@ -223,6 +285,10 @@ export default function App() {
             last_updated_at: entry.last_updated_at,
           })),
         );
+        setStoragePreference(pref);
+        setLocalRootPath(pref.local_root || localRoot);
+        setSyncStatus(sync);
+        setDriveStatus(drive);
 
         const first = loadedNotes[0];
         if (first) {
@@ -826,6 +892,146 @@ export default function App() {
     }
   }
 
+  async function handleStartDesktopSignIn() {
+    if (authBusy) return;
+    setManualSignInUrl(null);
+    setAuthBusy(true);
+    try {
+      const authUrl = await startDesktopAuthFlow();
+      setManualSignInUrl(authUrl);
+      setMessage('Sign in started. If browser did not open, use the button below.');
+    } catch (error) {
+      const fallback = 'Unable to open browser automatically.';
+      if (error instanceof Error) {
+        const match = error.message.match(/https?:\/\/\S+/);
+        if (match?.[0]) {
+          setManualSignInUrl(match[0]);
+          setMessage(`${fallback} Click the button below to continue.`);
+        } else {
+          setMessage(error.message || fallback);
+        }
+      } else {
+        setMessage(fallback);
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleDesktopAuthCallback(rawUrl: string) {
+    try {
+      const parsed = new URL(rawUrl);
+      const code = parsed.searchParams.get('code');
+      if (!code) {
+        setMessage('Sign-in callback missing code.');
+        return;
+      }
+      const response = await completeDesktopAuth(code);
+      if (!response.session_token || !response.user_id) {
+        setMessage('Unable to complete sign in.');
+        return;
+      }
+
+      localStorage.setItem('notebook_has_visited', 'true');
+      localStorage.setItem('notebook_session_token', response.session_token);
+      localStorage.setItem('notebook_session_user_id', response.user_id);
+      setSessionUserId(response.user_id);
+      setShowSplash(false);
+      setMessage('Signed in. Desktop is ready.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Desktop sign in failed');
+    }
+  }
+
+  async function handleStorageModeChange(mode: StoragePreference['mode']) {
+    setStorageBusy(true);
+    try {
+      const updated = await updateStoragePreference(mode);
+      setStoragePreference(updated);
+      const sync = await fetchSyncStatus();
+      setSyncStatus(sync);
+      if (mode === 'local_and_drive') {
+        const drive = await fetchGoogleDriveStatus().catch(() => DEFAULT_DRIVE_STATUS);
+        setDriveStatus(drive);
+        setMessage(
+          drive.connected
+            ? `Drive mirror enabled (${drive.folder_name || 'Notebook AI'}).`
+            : 'Drive mirror enabled. Connect Google Drive to start mirroring.',
+        );
+      } else {
+        setMessage('Local-only storage enabled.');
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update storage preference');
+    } finally {
+      setStorageBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (!sessionUserId || logoutBusy) return;
+    setLogoutBusy(true);
+    try {
+      localStorage.removeItem('notebook_session_token');
+      localStorage.removeItem('notebook_session_user_id');
+      setSessionUserId(null);
+      setManualSignInUrl(null);
+      setShowSplash(true);
+      setSettingsOpen(false);
+      setMessage('Signed out successfully.');
+    } finally {
+      setLogoutBusy(false);
+    }
+  }
+
+  async function handleRefreshDriveStatus() {
+    setDriveStatusBusy(true);
+    try {
+      const status = await fetchGoogleDriveStatus();
+      setDriveStatus(status);
+      setMessage(
+        status.connected
+          ? `Google Drive connected (${status.folder_name || 'Notebook AI'}).`
+          : 'Google Drive is not connected yet.',
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to load Google Drive status');
+    } finally {
+      setDriveStatusBusy(false);
+    }
+  }
+
+  function handleConnectGoogleDrive() {
+    openGoogleDriveConnect();
+    setMessage('Google Drive connect opened in browser. Approve access, then click Refresh status.');
+  }
+
+  async function handleChooseLocalFolder() {
+    try {
+      const selected = await window.notebookDesktop.chooseDirectory();
+      if (!selected) return;
+      const updatedPath = await setLocalRoot(selected);
+      setLocalRootPath(updatedPath);
+      setStoragePreference((prev) => ({ ...prev, local_root: updatedPath }));
+      setMessage('Local storage folder updated.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update local folder');
+    }
+  }
+
+  async function handleRunSyncNow() {
+    setStorageBusy(true);
+    try {
+      const status = await runSyncNow();
+      setSyncStatus(status);
+      setMessage('Drive sync run complete.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to run sync');
+    } finally {
+      setStorageBusy(false);
+    }
+  }
+
   function stopCaptureTracks() {
     clearInterviewSegmentTimer();
     captureActiveRef.current = false;
@@ -968,8 +1174,8 @@ export default function App() {
         setTranscriptionBusy(true);
         setTranscriptionStatus(
           transcriptionEngine === 'llm'
-            ? 'Transcribing full recording (LLM)...'
-            : 'Transcribing final recording (Whisper)...',
+            ? 'Transcribing full recording (Detailed mode)...'
+            : 'Transcribing final recording (Fast mode)...',
         );
 
         void transcribeAudioChunk(merged, 'openai', transcriptionEngine)
@@ -984,8 +1190,8 @@ export default function App() {
             } else {
               setTranscriptionStatus(
                 transcriptionEngine === 'llm'
-                  ? 'LLM returned no text for this recording.'
-                  : 'Whisper returned no text for this recording.',
+                  ? 'Detailed mode returned no text for this recording.'
+                  : 'Fast mode returned no text for this recording.',
               );
             }
           })
@@ -994,8 +1200,8 @@ export default function App() {
               error instanceof Error
                 ? error.message
                 : transcriptionEngine === 'llm'
-                  ? 'LLM transcription failed.'
-                  : 'Whisper transcription failed.',
+                  ? 'Detailed transcription failed.'
+                  : 'Fast transcription failed.',
             );
           })
           .finally(() => {
@@ -1163,9 +1369,17 @@ export default function App() {
     return (
       <SplashScreen
         onLogin={() => {
-          localStorage.setItem('notebook_has_visited', 'true');
-          setShowSplash(false);
+          if (sessionUserId) {
+            localStorage.setItem('notebook_has_visited', 'true');
+            setShowSplash(false);
+            return;
+          }
+          void handleStartDesktopSignIn();
         }}
+        authBusy={authBusy}
+        sessionUserId={sessionUserId}
+        statusMessage={message}
+        manualSignInUrl={manualSignInUrl}
       />
     );
   }
@@ -1235,7 +1449,7 @@ export default function App() {
             busy={transcriptionBusy}
             status={transcriptionStatus}
             onStart={(opts) => {
-              void startRecording(opts.captureMode, opts.engine, opts.mode);
+              void startRecording(opts.captureMode, transcriptionEngine, opts.mode);
             }}
             onStop={stopRecording}
             onModeChange={setActiveSessionMode}
@@ -1388,6 +1602,35 @@ export default function App() {
         }}
         theme={theme}
         onThemeChange={setTheme}
+        sessionUserId={sessionUserId}
+        logoutBusy={logoutBusy}
+        storageMode={storagePreference.mode}
+        localRootPath={localRootPath}
+        storageBusy={storageBusy}
+        syncPendingOps={syncStatus?.pending_ops ?? 0}
+        driveConnected={driveStatus.connected}
+        driveFolderName={driveStatus.folder_name || 'Notebook AI'}
+        driveStatusBusy={driveStatusBusy}
+        onStorageModeChange={(mode) => {
+          void handleStorageModeChange(mode);
+        }}
+        onChooseLocalFolder={() => {
+          void handleChooseLocalFolder();
+        }}
+        onRunSyncNow={() => {
+          void handleRunSyncNow();
+        }}
+        onLogout={() => {
+          void handleLogout();
+        }}
+        onConnectDrive={() => {
+          handleConnectGoogleDrive();
+        }}
+        onRefreshDriveStatus={() => {
+          void handleRefreshDriveStatus();
+        }}
+        transcriptionEngine={transcriptionEngine}
+        onTranscriptionEngineChange={handleTranscriptionEngineChange}
       />
     </main>
   );

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,20 +12,30 @@ from .config import Settings
 from .logging_setup import configure_sidecar_logging
 from .models import (
     AITransformRequest,
+    FolderCreateRequest,
+    FolderNode,
+    FolderUpdateRequest,
     HealthResponse,
     InterviewAssistRequest,
     InterviewCoachRequest,
     InterviewTurnsRequest,
     InterviewTurnsResponse,
+    LocalRootResponse,
+    LocalRootUpdateRequest,
+    MoveNoteRequest,
     NoteCreateRequest,
     NoteDocument,
     NoteUpdateRequest,
     ProviderConnection,
     ProviderStatusUpdateRequest,
+    StoragePreference,
+    StoragePreferenceUpdateRequest,
+    SyncStatus,
     TranscriptionChunkResponse,
 )
 from .notes_store import NoteStore
 from .provider_status_store import ProviderStatusStore
+from .storage_profile_store import StorageProfileStore
 from .services.ai_service import AIService
 from .services.transcription_service import TranscriptionService
 
@@ -36,6 +47,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     note_store = NoteStore(current_settings.notes_dir)
     provider_status_store = ProviderStatusStore(current_settings.profile_path)
+    storage_store = StorageProfileStore(
+        current_settings.storage_profile_path,
+        current_settings.sync_profile_path,
+    )
+    startup_pref = storage_store.get_preference(note_store.get_local_root())
+    if startup_pref.local_root:
+        note_store.set_notes_dir(Path(startup_pref.local_root))
+    storage_store.set_sync_enabled(startup_pref.mode == "local_and_drive")
     ai_service = AIService(current_settings)
     transcription_service = TranscriptionService(current_settings)
 
@@ -67,6 +86,81 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return note_store.update_note(note_id=note_id, payload=payload)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/notes/{note_id}/move", response_model=NoteDocument)
+    async def move_note(note_id: str, payload: MoveNoteRequest) -> NoteDocument:
+        try:
+            moved = note_store.move_note(note_id=note_id, folder_id=payload.folder_id)
+            storage_store.enqueue_sync_operation()
+            return moved
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_note(note_id: str) -> None:
+        if not note_store.delete_note(note_id):
+            raise HTTPException(status_code=404, detail=f"Note {note_id} not found")
+        storage_store.enqueue_sync_operation()
+
+    @app.get("/folders", response_model=list[FolderNode])
+    async def list_folders() -> list[FolderNode]:
+        return note_store.list_folders()
+
+    @app.post("/folders", response_model=FolderNode, status_code=status.HTTP_201_CREATED)
+    async def create_folder(payload: FolderCreateRequest) -> FolderNode:
+        try:
+            folder = note_store.create_folder(payload.name)
+            storage_store.enqueue_sync_operation()
+            return folder
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/folders/{folder_id}", response_model=FolderNode)
+    async def update_folder(folder_id: str, payload: FolderUpdateRequest) -> FolderNode:
+        try:
+            folder = note_store.update_folder(folder_id, payload.name)
+            storage_store.enqueue_sync_operation()
+            return folder
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_folder(folder_id: str) -> None:
+        if not note_store.delete_folder(folder_id):
+            raise HTTPException(status_code=404, detail=f"Folder {folder_id} not found")
+        storage_store.enqueue_sync_operation()
+
+    @app.get("/storage/local-root", response_model=LocalRootResponse)
+    async def get_local_root() -> LocalRootResponse:
+        return LocalRootResponse(local_root=note_store.get_local_root())
+
+    @app.put("/storage/local-root", response_model=LocalRootResponse)
+    async def set_local_root(payload: LocalRootUpdateRequest) -> LocalRootResponse:
+        note_store.set_notes_dir(Path(payload.local_root))
+        pref = storage_store.get_preference(note_store.get_local_root())
+        storage_store.set_preference(mode=pref.mode, local_root=note_store.get_local_root())
+        return LocalRootResponse(local_root=note_store.get_local_root())
+
+    @app.get("/storage/preference", response_model=StoragePreference)
+    async def get_storage_preference() -> StoragePreference:
+        return storage_store.get_preference(note_store.get_local_root())
+
+    @app.put("/storage/preference", response_model=StoragePreference)
+    async def update_storage_preference(payload: StoragePreferenceUpdateRequest) -> StoragePreference:
+        if payload.local_root:
+            note_store.set_notes_dir(Path(payload.local_root))
+        storage_store.set_sync_enabled(payload.mode == "local_and_drive")
+        return storage_store.set_preference(mode=payload.mode, local_root=note_store.get_local_root())
+
+    @app.get("/sync/status", response_model=SyncStatus)
+    async def get_sync_status() -> SyncStatus:
+        return storage_store.get_sync_status()
+
+    @app.post("/sync/run", response_model=SyncStatus)
+    async def run_sync() -> SyncStatus:
+        return storage_store.mark_sync_run()
 
     @app.post("/ai/transform/stream")
     async def stream_transform(payload: AITransformRequest) -> StreamingResponse:

@@ -18,3 +18,7 @@ coverage/
 .notebook-ai/
 *.tsbuildinfo
 *.egg-info/
+
+# Next.js (apps/web)
+apps/web/.next/
+apps/web/.vercel/

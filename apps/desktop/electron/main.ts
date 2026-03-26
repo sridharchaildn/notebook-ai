@@ -1,15 +1,35 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, type OpenDialogOptions } from 'electron';
 import { ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let sidecarProcess: ChildProcess | null = null;
 let cloudApiProcess: ChildProcess | null = null;
+let mainWindow: BrowserWindow | null = null;
 
-function startSidecar() {
+function isPortOpen(port: number, host = '127.0.0.1') {
+  return new Promise<boolean>((resolve) => {
+    const socket = net.connect({ port, host });
+    const done = (result: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
+async function startSidecar() {
   if (sidecarProcess) return;
+  if (await isPortOpen(8787)) {
+    process.stdout.write('[sidecar] Reusing existing service on 127.0.0.1:8787\n');
+    return;
+  }
 
   const devRoot = path.resolve(__dirname, '../../..');
   const sidecarCwd = path.resolve(devRoot, 'services/local-sidecar');
@@ -39,8 +59,12 @@ function startSidecar() {
   });
 }
 
-function startCloudApi() {
+async function startCloudApi() {
   if (cloudApiProcess) return;
+  if (await isPortOpen(8790)) {
+    process.stdout.write('[cloud-api] Reusing existing service on 127.0.0.1:8790\n');
+    return;
+  }
 
   const devRoot = path.resolve(__dirname, '../../..');
   const cloudCwd = path.resolve(devRoot, 'services/cloud-api');
@@ -106,11 +130,85 @@ function createWindow() {
   } else {
     void window.loadFile(path.join(__dirname, '../dist/index.html'));
   }
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      void openUrlOutsideApp(url);
+      return { action: 'deny' };
+    }
+    return { action: 'allow' };
+  });
+
+  window.on('closed', () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
+  });
+
+  mainWindow = window;
 }
 
-app.whenReady().then(() => {
-  startSidecar();
-  startCloudApi();
+function handleAuthCallbackUrl(rawUrl: string) {
+  if (!rawUrl.startsWith('notebook-ai://')) return;
+  if (mainWindow) {
+    mainWindow.webContents.send('auth:callback-url', rawUrl);
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+}
+
+function focusOrCreateMainWindow() {
+  const existing = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  if (!existing) {
+    createWindow();
+    return;
+  }
+
+  mainWindow = existing;
+  if (existing.isMinimized()) existing.restore();
+  existing.show();
+  existing.focus();
+}
+
+async function openUrlOutsideApp(url: string) {
+  try {
+    await shell.openExternal(url);
+    return;
+  } catch (error) {
+    if (process.platform === 'darwin') {
+      try {
+        const opener = spawn('open', [url], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        opener.unref();
+        return;
+      } catch {
+        /* fall through to original error */
+      }
+    }
+    throw error;
+  }
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
+app.on('second-instance', (_event, argv) => {
+  const callbackUrl = argv.find((arg) => arg.startsWith('notebook-ai://'));
+  if (callbackUrl) {
+    handleAuthCallbackUrl(callbackUrl);
+    focusOrCreateMainWindow();
+    return;
+  }
+  focusOrCreateMainWindow();
+});
+
+app.whenReady().then(async () => {
+  app.setAsDefaultProtocolClient('notebook-ai');
+
+  await Promise.all([startSidecar(), startCloudApi()]);
 
   session.defaultSession.setDisplayMediaRequestHandler(
     async (_request, callback) => {
@@ -134,10 +232,25 @@ app.whenReady().then(() => {
   );
 
   ipcMain.handle('app:open-external', async (_event, url: string) => {
-    await shell.openExternal(url);
+    await openUrlOutsideApp(url);
+  });
+
+  ipcMain.handle('app:choose-directory', async () => {
+    const browser = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    const options: OpenDialogOptions = { properties: ['openDirectory', 'createDirectory'] };
+    const result = browser
+      ? await dialog.showOpenDialog(browser, options)
+      : await dialog.showOpenDialog(options);
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
   });
 
   createWindow();
+
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    handleAuthCallbackUrl(url);
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

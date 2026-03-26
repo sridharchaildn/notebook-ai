@@ -26,6 +26,7 @@ class NoteFrontmatter(BaseModel):
     tags: list[str] = Field(default_factory=list)
     provider: ProviderId | None = None
     model: str | None = None
+    folder_id: str | None = None
 
 
 class NoteDocument(BaseModel):
@@ -39,6 +40,7 @@ class NoteCreateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     provider: ProviderId | None = None
     model: str | None = None
+    folder_id: str | None = None
 
 
 class NoteUpdateRequest(BaseModel):
@@ -47,6 +49,11 @@ class NoteUpdateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     provider: ProviderId | None = None
     model: str | None = None
+    folder_id: str | None = None
+
+
+class MoveNoteRequest(BaseModel):
+    folder_id: str | None = None
 
 
 class AITransformRequest(BaseModel):
@@ -117,3 +124,44 @@ class TranscriptionChunkResponse(BaseModel):
     error_code: TranscriptionErrorCode = "none"
     recoverable: bool = False
     segment_id: int | None = None
+
+
+class StoragePreference(BaseModel):
+    mode: Literal["local", "local_and_drive"] = "local"
+    local_root: str | None = None
+    updated_at: datetime | None = None
+
+
+class StoragePreferenceUpdateRequest(BaseModel):
+    mode: Literal["local", "local_and_drive"] = "local"
+    local_root: str | None = None
+
+
+class FolderNode(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class FolderCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class FolderUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class LocalRootResponse(BaseModel):
+    local_root: str
+
+
+class LocalRootUpdateRequest(BaseModel):
+    local_root: str = Field(min_length=1)
+
+
+class SyncStatus(BaseModel):
+    enabled: bool = False
+    pending_ops: int = 0
+    last_run_at: datetime | None = None
+    last_error: str | None = None

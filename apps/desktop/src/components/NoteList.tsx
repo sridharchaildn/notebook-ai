@@ -92,7 +92,7 @@ export function NoteList({
           <Settings size={16} />
           Settings
         </button>
-        <button type="button" className="footer-btn" onClick={() => window.open('https://github.com', '_blank')}>
+        <button type="button" className="footer-btn" onClick={() => window.open('http://127.0.0.1:3000', '_blank')}>
           <HelpCircle size={16} />
           Help
         </button>

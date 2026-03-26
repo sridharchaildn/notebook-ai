@@ -9,7 +9,9 @@
   ],
   "scripts": {
     "dev:desktop": "npm --workspace @notebook-ai/desktop run dev",
+    "dev:web": "npm --workspace @notebook-ai/web run dev",
     "build:desktop": "npm --workspace @notebook-ai/desktop run build",
+    "build:web": "npm --workspace @notebook-ai/web run build",
     "test:desktop": "npm --workspace @notebook-ai/desktop run test"
   },
   "engines": {

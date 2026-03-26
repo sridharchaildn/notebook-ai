@@ -1,19 +1,47 @@
 import type {
   AITransformRequest,
   AITransformType,
+  DesktopAuthExchangeCompleteResponse,
+  DesktopAuthExchangeInitResponse,
+  DriveConnectionStatus,
+  FolderNode,
   InterviewCoachRequest,
   InterviewAssistRequest,
   InterviewTurnsRequest,
   InterviewTurnsResponse,
+  MoveNoteRequest,
   NoteDocument,
   ProviderConnection,
   ProviderId,
+  StoragePreference,
+  SyncStatus,
   TranscriptionChunkResponse,
 } from '@notebook-ai/contracts';
 
 const LOCAL_BASE_URL = import.meta.env.VITE_LOCAL_API_URL ?? 'http://127.0.0.1:8787';
 const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? 'http://127.0.0.1:8790';
 const CLOUD_USER_ID = import.meta.env.VITE_CLOUD_USER_ID ?? 'local-dev-user';
+const WEB_APP_URL = import.meta.env.VITE_WEB_APP_URL ?? 'http://127.0.0.1:3000';
+
+function getDesktopSessionToken(): string | null {
+  try {
+    return localStorage.getItem('notebook_session_token');
+  } catch {
+    return null;
+  }
+}
+
+async function parseResponseError(res: Response, fallback: string): Promise<Error> {
+  try {
+    const payload = (await res.json()) as { detail?: string };
+    if (typeof payload.detail === 'string' && payload.detail.trim().length > 0) {
+      return new Error(payload.detail);
+    }
+  } catch {
+    /* ignore */
+  }
+  return new Error(fallback);
+}
 
 export interface SaveNoteInput {
   id: string;
@@ -56,7 +84,215 @@ export async function updateNote(payload: SaveNoteInput): Promise<NoteDocument> 
   return (await res.json()) as NoteDocument;
 }
 
+export async function deleteNote(noteId: string): Promise<void> {
+  const res = await fetch(`${LOCAL_BASE_URL}/notes/${encodeURIComponent(noteId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    throw new Error('Failed to delete note.');
+  }
+}
+
+export async function moveNote(noteId: string, payload: MoveNoteRequest): Promise<NoteDocument> {
+  const res = await fetch(`${LOCAL_BASE_URL}/notes/${encodeURIComponent(noteId)}/move`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to move note.');
+  }
+  return (await res.json()) as NoteDocument;
+}
+
+export async function fetchFolders(): Promise<FolderNode[]> {
+  const res = await fetch(`${LOCAL_BASE_URL}/folders`);
+  if (!res.ok) {
+    throw new Error('Failed to load folders.');
+  }
+  return (await res.json()) as FolderNode[];
+}
+
+export async function createFolder(name: string): Promise<FolderNode> {
+  const res = await fetch(`${LOCAL_BASE_URL}/folders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to create folder.');
+  }
+  return (await res.json()) as FolderNode;
+}
+
+export async function renameFolder(folderId: string, name: string): Promise<FolderNode> {
+  const res = await fetch(`${LOCAL_BASE_URL}/folders/${encodeURIComponent(folderId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to rename folder.');
+  }
+  return (await res.json()) as FolderNode;
+}
+
+export async function deleteFolder(folderId: string): Promise<void> {
+  const res = await fetch(`${LOCAL_BASE_URL}/folders/${encodeURIComponent(folderId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    throw new Error('Failed to delete folder.');
+  }
+}
+
+export async function fetchLocalRoot(): Promise<string> {
+  const res = await fetch(`${LOCAL_BASE_URL}/storage/local-root`);
+  if (!res.ok) {
+    throw new Error('Failed to load local storage folder.');
+  }
+  const payload = (await res.json()) as { local_root: string };
+  return payload.local_root;
+}
+
+export async function setLocalRoot(localRoot: string): Promise<string> {
+  const res = await fetch(`${LOCAL_BASE_URL}/storage/local-root`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ local_root: localRoot }),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to update local storage folder.');
+  }
+  const payload = (await res.json()) as { local_root: string };
+  return payload.local_root;
+}
+
+export async function fetchStoragePreference(): Promise<StoragePreference> {
+  const res = await fetch(`${LOCAL_BASE_URL}/storage/preference`);
+  if (!res.ok) {
+    throw new Error('Failed to load storage preference.');
+  }
+  return (await res.json()) as StoragePreference;
+}
+
+export async function updateStoragePreference(mode: StoragePreference['mode']): Promise<StoragePreference> {
+  const res = await fetch(`${LOCAL_BASE_URL}/storage/preference`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to update storage preference.');
+  }
+  return (await res.json()) as StoragePreference;
+}
+
+export async function fetchSyncStatus(): Promise<SyncStatus> {
+  const res = await fetch(`${LOCAL_BASE_URL}/sync/status`);
+  if (!res.ok) {
+    throw new Error('Failed to load sync status.');
+  }
+  return (await res.json()) as SyncStatus;
+}
+
+export async function runSyncNow(): Promise<SyncStatus> {
+  const res = await fetch(`${LOCAL_BASE_URL}/sync/run`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    throw new Error('Failed to run sync.');
+  }
+  return (await res.json()) as SyncStatus;
+}
+
+export async function fetchGoogleDriveStatus(): Promise<DriveConnectionStatus> {
+  const sessionToken = getDesktopSessionToken();
+  const query = sessionToken
+    ? `session_token=${encodeURIComponent(sessionToken)}`
+    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
+  const res = await fetch(`${CLOUD_BASE_URL}/integrations/google-drive/status?${query}`);
+  if (!res.ok) {
+    throw new Error('Failed to load Google Drive status.');
+  }
+  return (await res.json()) as DriveConnectionStatus;
+}
+
+export function openGoogleDriveConnect(): void {
+  const sessionToken = getDesktopSessionToken();
+  const query = sessionToken
+    ? `session_token=${encodeURIComponent(sessionToken)}`
+    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
+  const url = `${CLOUD_BASE_URL}/integrations/google-drive/oauth/start?${query}`;
+  void window.notebookDesktop.openExternal(url);
+}
+
+export async function startDesktopAuthFlow(deviceLabel = 'Notebook AI Desktop'): Promise<string> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 8000);
+
+  let res: Response;
+  try {
+    res = await fetch(`${CLOUD_BASE_URL}/auth/desktop/exchange/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_label: deviceLabel }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if ((error as { name?: string })?.name === 'AbortError') {
+      throw new Error(
+        `Desktop sign in timed out. Verify cloud API is running at ${CLOUD_BASE_URL}.`,
+      );
+    }
+    throw new Error(
+      `Unable to reach cloud API at ${CLOUD_BASE_URL}. Start services/cloud-api first.`,
+    );
+  } finally {
+    window.clearTimeout(timeout);
+  }
+
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to start desktop sign in.');
+  }
+
+  const payload = (await res.json()) as DesktopAuthExchangeInitResponse;
+  const authUrl = payload.auth_url || `${WEB_APP_URL}/desktop/auth`;
+
+  if (window.notebookDesktop?.openExternal) {
+    try {
+      await window.notebookDesktop.openExternal(authUrl);
+      return authUrl;
+    } catch {
+      throw new Error(
+        `Could not open your default browser automatically. Open this URL manually: ${authUrl}`,
+      );
+    }
+  }
+
+  throw new Error(
+    `Desktop bridge unavailable. Open this URL manually: ${authUrl}`,
+  );
+}
+
+export async function completeDesktopAuth(code: string): Promise<DesktopAuthExchangeCompleteResponse> {
+  const res = await fetch(`${CLOUD_BASE_URL}/auth/desktop/exchange/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    throw new Error('Unable to complete desktop sign in.');
+  }
+  return (await res.json()) as DesktopAuthExchangeCompleteResponse;
+}
+
 export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
+  const sessionToken = getDesktopSessionToken();
+  const cloudQuery = sessionToken
+    ? `session_token=${encodeURIComponent(sessionToken)}`
+    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
+
   const [local, cloud] = await Promise.all([
     fetch(`${LOCAL_BASE_URL}/providers/status`)
       .then(async (res) => {
@@ -64,7 +300,7 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
         return (await res.json()) as ProviderConnection[];
       })
       .catch(() => [] as ProviderConnection[]),
-    fetch(`${CLOUD_BASE_URL}/providers/status?user_id=${encodeURIComponent(CLOUD_USER_ID)}`)
+    fetch(`${CLOUD_BASE_URL}/providers/status?${cloudQuery}`)
       .then(async (res) => {
         if (!res.ok) return [] as ProviderConnection[];
         return (await res.json()) as ProviderConnection[];
@@ -93,10 +329,16 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
 }
 
 export async function storeByok(provider: ProviderId, apiKey: string): Promise<void> {
+  const sessionToken = getDesktopSessionToken();
   const res = await fetch(`${CLOUD_BASE_URL}/providers/byok`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, api_key: apiKey, user_id: CLOUD_USER_ID }),
+    body: JSON.stringify({
+      provider,
+      api_key: apiKey,
+      user_id: CLOUD_USER_ID,
+      session_token: sessionToken,
+    }),
   });
 
   if (!res.ok) {
@@ -111,13 +353,21 @@ export async function storeByok(provider: ProviderId, apiKey: string): Promise<v
 }
 
 export function openOpenAIOAuth(): void {
-  const url = `${CLOUD_BASE_URL}/providers/openai/oauth/start?user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
+  const sessionToken = getDesktopSessionToken();
+  const query = sessionToken
+    ? `session_token=${encodeURIComponent(sessionToken)}`
+    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
+  const url = `${CLOUD_BASE_URL}/providers/openai/oauth/start?${query}`;
   void window.notebookDesktop.openExternal(url);
 }
 
 export async function disconnectProvider(provider: ProviderId): Promise<void> {
+  const sessionToken = getDesktopSessionToken();
+  const query = sessionToken
+    ? `session_token=${encodeURIComponent(sessionToken)}`
+    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
   const res = await fetch(
-    `${CLOUD_BASE_URL}/providers/${encodeURIComponent(provider)}?user_id=${encodeURIComponent(CLOUD_USER_ID)}`,
+    `${CLOUD_BASE_URL}/providers/${encodeURIComponent(provider)}?${query}`,
     { method: 'DELETE' },
   );
 

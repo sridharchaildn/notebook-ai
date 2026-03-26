@@ -5,11 +5,9 @@ import type { TranscriptionEngine } from '../lib/api';
 
 export type CaptureMode = 'mic' | 'system';
 export type CaptureSessionMode = 'notes' | 'interview_assist';
-export type { TranscriptionEngine };
 
 export interface TranscriptionStartOptions {
   captureMode: CaptureMode;
-  engine: TranscriptionEngine;
   mode: CaptureSessionMode;
 }
 
@@ -31,124 +29,93 @@ export function TranscriptionPanel({
   onModeChange,
 }: Props) {
   const [captureMode, setCaptureMode] = useState<CaptureMode>('mic');
-  const [engine, setEngine] = useState<TranscriptionEngine>('whisper');
   const [mode, setMode] = useState<CaptureSessionMode>('notes');
 
   return (
     <section className="transcription-panel">
       {/* Header */}
       <div className="section-title-row">
-        <h2>Voice & Audio Capture</h2>
-        {busy ? <LoaderCircle className="spin" size={16} /> : <AudioLines size={16} style={{ color: 'var(--primary)' }} />}
+        <h2>Voice Capture</h2>
+        {busy ? <LoaderCircle className="spin" size={16} /> : <AudioLines size={16} style={{ color: recording ? 'var(--danger)' : 'var(--primary)' }} />}
       </div>
 
-      {/* Two-column controls */}
-      <div className="transcription-controls">
-        <div className="transcription-control-group">
-          <div className="transcription-control-label">Mode</div>
-          <div className="transcription-mode-toggle" role="group" aria-label="Capture mode">
-            <button
-              type="button"
-              className={`mode-toggle-btn${mode === 'notes' ? ' active' : ''}`}
-              disabled={recording}
-              onClick={() => {
-                setMode('notes');
-                onModeChange?.('notes');
-              }}
-            >
-              Notes
-            </button>
-            <button
-              type="button"
-              className={`mode-toggle-btn${mode === 'interview_assist' ? ' active' : ''}`}
-              disabled={recording}
-              onClick={() => {
-                setMode('interview_assist');
-                onModeChange?.('interview_assist');
-              }}
-            >
-              Interview Assist
-            </button>
+      <div className="transcription-layout-grid">
+        {/* Top: Mode & Source Toggles */}
+        <div className="transcription-controls-row">
+          <div className="setting-block">
+            <span className="setting-label">Mode</span>
+            <div className="compact-toggle" role="group">
+              <button
+                type="button"
+                className={`compact-toggle-btn${mode === 'notes' ? ' active' : ''}`}
+                disabled={recording}
+                onClick={() => { setMode('notes'); onModeChange?.('notes'); }}
+              >
+                Notes
+              </button>
+              <button
+                type="button"
+                className={`compact-toggle-btn${mode === 'interview_assist' ? ' active' : ''}`}
+                disabled={recording}
+                onClick={() => { setMode('interview_assist'); onModeChange?.('interview_assist'); }}
+              >
+                Interview
+              </button>
+            </div>
+          </div>
+
+          <div className="setting-block">
+            <span className="setting-label">Source</span>
+            <div className="compact-toggle" role="group">
+              <button
+                type="button"
+                className={`compact-toggle-btn${captureMode === 'mic' ? ' active' : ''}`}
+                disabled={recording}
+                onClick={() => setCaptureMode('mic')}
+              >
+                <Mic size={14} /> Mic
+              </button>
+              <button
+                type="button"
+                className={`compact-toggle-btn${captureMode === 'system' ? ' active' : ''}`}
+                disabled={recording}
+                onClick={() => setCaptureMode('system')}
+              >
+                <MonitorSpeaker size={14} /> System
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Source selection */}
-        <div className="transcription-control-group">
-          <div className="transcription-control-label">Source</div>
-          <div className="transcription-mode-toggle" role="group" aria-label="Capture source">
-            <button
-              type="button"
-              className={`mode-toggle-btn${captureMode === 'mic' ? ' active' : ''}`}
-              disabled={recording}
-              onClick={() => setCaptureMode('mic')}
-            >
-              <Mic size={14} aria-hidden />
-              Mic
-            </button>
-            <button
-              type="button"
-              className={`mode-toggle-btn${captureMode === 'system' ? ' active' : ''}`}
-              disabled={recording}
-              onClick={() => setCaptureMode('system')}
-            >
-              <MonitorSpeaker size={14} aria-hidden />
-              System
-            </button>
-          </div>
-        </div>
-
-        {/* Engine selection */}
-        <div className="transcription-control-group">
-          <div className="transcription-control-label">Engine</div>
-          <div className="transcription-mode-toggle" role="group" aria-label="Transcription engine">
-            <button
-              type="button"
-              className={`mode-toggle-btn${engine === 'whisper' ? ' active' : ''}`}
-              disabled={recording}
-              onClick={() => setEngine('whisper')}
-            >
-              <Waves size={14} aria-hidden />
-              Whisper
-            </button>
-            <button
-              type="button"
-              className={`mode-toggle-btn${engine === 'llm' ? ' active' : ''}`}
-              disabled={recording}
-              onClick={() => setEngine('llm')}
-            >
-              <Brain size={14} aria-hidden />
-              LLM
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Action row */}
-      <div className="transcription-action-row">
-        {recording ? (
-          <button type="button" className="solid-btn danger" onClick={onStop}>
-            <CircleStop size={15} />
-            Stop
-          </button>
-        ) : (
+        {/* Bottom: Big Record Button */}
+        <div className="transcription-action-main">
           <button
             type="button"
-            className="solid-btn"
-            onClick={() => onStart({ captureMode, engine, mode })}
+            className={`record-button-giant${recording ? ' recording' : ''}`}
+            onClick={() => recording ? onStop() : onStart({ captureMode, mode })}
+            aria-label={recording ? 'Stop Capture' : 'Start Capture'}
           >
-            <Mic size={15} />
-            {mode === 'interview_assist' ? 'Start Interview Assist' : 'Start Recording'}
+            {recording ? (
+              <>
+                <CircleStop size={18} />
+                Stop Capture
+              </>
+            ) : (
+              <>
+                <Mic size={18} />
+                {mode === 'notes' ? 'Start Recording' : 'Start Interview'}
+              </>
+            )}
+            {recording && <div className="recording-rings" />}
           </button>
-        )}
-
-        <span className={recording ? 'recording-pill live' : 'recording-pill'}>
-          <span className={recording ? 'recording-dot live' : 'recording-dot'} />
-          {recording ? 'Recording' : 'Idle'}
-        </span>
+        </div>
       </div>
 
-      {/* Status line */}
-      <div className="transcription-status">{status}</div>
+      {/* Status Bar */}
+      <div className="transcription-status-bar">
+        <span className={`status-dot${recording ? ' live' : ''}`} />
+        <span className="status-text">{status}</span>
+      </div>
     </section>
   );
 }

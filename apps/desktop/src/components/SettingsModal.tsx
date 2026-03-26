@@ -2,6 +2,10 @@ import type { ProviderConnection, ProviderId } from '@notebook-ai/contracts';
 import {
   CircleCheckBig,
   CircleDashed,
+  Cloud,
+  Folder,
+  FolderSync,
+  HardDrive,
   Keyboard,
   KeyRound,
   Link,
@@ -11,6 +15,9 @@ import {
   Unplug,
   X,
   Zap,
+  Waves,
+  Brain,
+  Info,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -33,6 +40,24 @@ interface Props {
   /* Theme props */
   theme: 'light' | 'dark';
   onThemeChange: (theme: 'light' | 'dark') => void;
+  /* Storage + account props */
+  sessionUserId: string | null;
+  logoutBusy: boolean;
+  storageMode: 'local' | 'local_and_drive';
+  localRootPath: string;
+  storageBusy: boolean;
+  syncPendingOps: number;
+  driveConnected: boolean;
+  driveFolderName: string;
+  driveStatusBusy: boolean;
+  onStorageModeChange: (mode: 'local' | 'local_and_drive') => void;
+  onChooseLocalFolder: () => void;
+  onRunSyncNow: () => void;
+  onLogout: () => void;
+  transcriptionEngine: 'whisper' | 'llm';
+  onTranscriptionEngineChange: (engine: 'whisper' | 'llm') => void;
+  onConnectDrive: () => void;
+  onRefreshDriveStatus: () => void;
 }
 
 const providerLabel: Record<ProviderConnection['provider'], string> = {
@@ -42,7 +67,7 @@ const providerLabel: Record<ProviderConnection['provider'], string> = {
 
 const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
   { id: 'general', label: 'General', icon: <Settings size={16} /> },
-  { id: 'providers', label: 'AI Providers', icon: <Zap size={16} /> },
+  { id: 'providers', label: 'AI Connection', icon: <Zap size={16} /> },
   { id: 'transcription', label: 'Transcription', icon: <Mic size={16} /> },
   { id: 'appearance', label: 'Appearance', icon: <Palette size={16} /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={16} /> },
@@ -63,6 +88,23 @@ export function SettingsModal({
   onDisconnectProvider,
   theme,
   onThemeChange,
+  sessionUserId,
+  logoutBusy,
+  storageMode,
+  localRootPath,
+  storageBusy,
+  syncPendingOps,
+  driveConnected,
+  driveFolderName,
+  driveStatusBusy,
+  onStorageModeChange,
+  onChooseLocalFolder,
+  onRunSyncNow,
+  onLogout,
+  transcriptionEngine,
+  onTranscriptionEngineChange,
+  onConnectDrive,
+  onRefreshDriveStatus,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
 
@@ -204,18 +246,164 @@ export function SettingsModal({
           {activeTab === 'general' && (
             <>
               <h3>General</h3>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>
-                General settings will appear here in future updates.
-              </p>
+              <div style={{ display: 'grid', gap: '10px' }}>
+                <div className="provider-chip">
+                  <div className="provider-chip__title">
+                    <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
+                      <Cloud size={14} />
+                      Account
+                    </span>
+                  </div>
+                  <small>{sessionUserId ? `Signed in as ${sessionUserId}` : 'Not signed in yet.'}</small>
+                  {sessionUserId ? (
+                    <div style={{ marginTop: '8px' }}>
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={onLogout}
+                        disabled={logoutBusy}
+                      >
+                        <Unplug size={14} />
+                        {logoutBusy ? 'Signing out...' : 'Sign out'}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="provider-chip">
+                  <div className="provider-chip__title">
+                    <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
+                      <HardDrive size={14} />
+                      Transcript Storage
+                    </span>
+                  </div>
+                  <small>Choose local-only or local + Google Drive mirror.</small>
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      className={`settings-tab${storageMode === 'local' ? ' active' : ''}`}
+                      onClick={() => onStorageModeChange('local')}
+                      disabled={storageBusy}
+                      style={{ flex: 1, justifyContent: 'center' }}
+                    >
+                      Local only
+                    </button>
+                    <button
+                      type="button"
+                      className={`settings-tab${storageMode === 'local_and_drive' ? ' active' : ''}`}
+                      onClick={() => onStorageModeChange('local_and_drive')}
+                      disabled={storageBusy}
+                      style={{ flex: 1, justifyContent: 'center' }}
+                    >
+                      Local + Drive
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gap: '8px', marginTop: '8px' }}>
+                    <button type="button" className="ghost-btn" onClick={onChooseLocalFolder} disabled={storageBusy}>
+                      <Folder size={14} />
+                      Choose Local Folder
+                    </button>
+                    <small title={localRootPath}>{localRootPath || 'No folder selected yet.'}</small>
+                    {storageMode === 'local_and_drive' ? (
+                      <div className="provider-chip" style={{ marginTop: '2px' }}>
+                        <div className="provider-chip__title">
+                          <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
+                            <Cloud size={14} />
+                            Google Drive
+                          </span>
+                          {driveConnected ? (
+                            <span className="connected-badge success">
+                              <CircleCheckBig size={12} /> Connected
+                            </span>
+                          ) : (
+                            <span className="connected-badge warning">
+                              <CircleDashed size={12} /> Not connected
+                            </span>
+                          )}
+                        </div>
+                        <small>
+                          {driveConnected
+                            ? `Mirroring to "${driveFolderName || 'Notebook AI'}".`
+                            : 'Connect Drive to enable cloud mirror for transcripts.'}
+                        </small>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                          {!driveConnected ? (
+                            <button
+                              type="button"
+                              className="cta-btn"
+                              onClick={onConnectDrive}
+                              disabled={storageBusy || driveStatusBusy}
+                              style={{ flex: 1, justifyContent: 'center' }}
+                            >
+                              <Link size={14} />
+                              Connect Google Drive
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="ghost-btn"
+                            onClick={onRefreshDriveStatus}
+                            disabled={storageBusy || driveStatusBusy}
+                            style={{ flex: driveConnected ? 1 : undefined }}
+                          >
+                            <FolderSync size={14} />
+                            {driveStatusBusy ? 'Refreshing...' : 'Refresh status'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    <button type="button" className="ghost-btn" onClick={onRunSyncNow} disabled={storageBusy}>
+                      <FolderSync size={14} />
+                      Sync now ({syncPendingOps} pending)
+                    </button>
+                  </div>
+                </div>
+              </div>
             </>
           )}
 
           {activeTab === 'transcription' && (
             <>
-              <h3>Transcription</h3>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>
-                Transcription engine preferences will appear here in future updates.
+              <h3>Transcription Quality</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', marginBottom: '16px' }}>
+                Capture quality determines how your audio is processed. Fast mode uses local or fast models, while Detailed mode uses slower, more accurate models.
               </p>
+
+              <div style={{ display: 'grid', gap: '10px' }}>
+                <article 
+                  className={`provider-chip${transcriptionEngine === 'whisper' ? ' active' : ''}`}
+                  style={{ cursor: 'pointer', borderColor: transcriptionEngine === 'whisper' ? 'var(--primary)' : undefined, opacity: transcriptionEngine === 'whisper' ? 1 : 0.6 }}
+                  onClick={() => onTranscriptionEngineChange('whisper')}
+                >
+                  <div className="provider-chip__title">
+                    <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
+                      <Waves size={14} />
+                      Fast Mode
+                    </span>
+                    <span title="Uses Whisper for real-time, fast transcription. Good for clear audio and quick notes.">
+                      <Info size={16} style={{ color: 'var(--text-tertiary)' }} />
+                    </span>
+                  </div>
+                  <small>Optimized for speed and local processing.</small>
+                </article>
+
+                <article 
+                  className={`provider-chip${transcriptionEngine === 'llm' ? ' active' : ''}`}
+                  style={{ cursor: 'pointer', borderColor: transcriptionEngine === 'llm' ? 'var(--primary)' : undefined, opacity: transcriptionEngine === 'llm' ? 1 : 0.6 }}
+                  onClick={() => onTranscriptionEngineChange('llm')}
+                >
+                  <div className="provider-chip__title">
+                    <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
+                      <Brain size={14} />
+                      Detailed Mode
+                    </span>
+                    <span title="Uses advanced language models to deeply understand complex context, accents, and industry terms.">
+                      <Info size={16} style={{ color: 'var(--text-tertiary)' }} />
+                    </span>
+                  </div>
+                  <small>Optimized for deeper accuracy on complex topics.</small>
+                </article>
+              </div>
             </>
           )}
 

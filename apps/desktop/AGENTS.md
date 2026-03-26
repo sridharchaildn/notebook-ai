@@ -1,12 +1,14 @@
 # Notebook AI Desktop — UI/UX Standards
 
-This document defines the UI/UX standards, colors, typography, and component patterns for the Notebook AI desktop app. All future features and screens must follow these conventions to maintain visual consistency.
+This document defines the UI/UX standards, colors, typography, and component patterns for the Notebook AI desktop app. All future features and screens must follow these conventions to maintain visual consistency across both desktop and web apps.
 
 ---
 
 ## Design System: Neutral Premium (Linear-inspired)
 
-Inspired by **Linear**, **Notion**, and **Raycast**. The aesthetic is premium, minimal, and clean with careful use of color and shadow.
+Inspired by **Linear**, **Notion**, and **Raycast**. The aesthetic is premium, minimal, and clean with careful use of color, shadow, and generous spacing.
+
+> **Cross-app consistency**: The web app (`apps/web/AGENTS.md`) shares the same token system (`packages/theme/src/tokens.css`). Desktop and web must stay aligned on colors, typography, and component naming.
 
 ---
 
@@ -95,6 +97,20 @@ Shadows use dual layers for depth. Dark mode uses stronger shadows since contras
 
 ---
 
+## Animation Tokens
+
+Defined in `packages/theme/src/tokens.css` and shared with the web app.
+
+| Token              | Value                                    | Usage                 |
+|--------------------|------------------------------------------|-----------------------|
+| `--duration-fast`  | `120ms`                                  | Hover transitions     |
+| `--duration-normal`| `200ms`                                  | Panel opens, toggles  |
+| `--duration-slow`  | `320ms`                                  | Modal entrance        |
+| `--ease-out`       | `cubic-bezier(0.16, 1, 0.3, 1)`         | Smooth deceleration   |
+| `--ease-spring`    | `cubic-bezier(0.34, 1.56, 0.64, 1)`     | Bouncy micro-actions  |
+
+---
+
 ## Border & Corner Radius
 
 | Radius   | Usage                                                   |
@@ -145,6 +161,21 @@ Shadows use dual layers for depth. Dark mode uses stronger shadows since contras
 - Container: `var(--surface-sunken)` background, `8px` radius
 - Active segment: `var(--surface)` background with `var(--shadow-xs)`
 - Active text: `var(--primary)` color
+
+### App Logo
+- White `BookOpen` icon (or SVG equivalent) inside a rounded square with `var(--primary)` background
+- Used in splash screen, sidebar header, and settings modal
+- Consistent with web app's `AppLogo` component
+- Sizes: `32px` (sidebar), `48px` (splash), `24px` (settings header)
+
+### BYOK / Provider Section (Settings)
+- Emphasize **Bring Your Own Key** model throughout the settings UI
+- Provider cards: icon + name + API key input + status badge
+- Supported: **OpenAI**, **OpenRouter** (+ "More soon" placeholder)
+- Each provider card uses `var(--surface-sunken)` background with subtle border
+- Status badges: `.connected-badge.success` (green) or `.connected-badge.warning` (amber)
+- Key inputs use `type="password"` with a toggle reveal button
+- No subscription messaging — match web landing page's BYOK emphasis
 
 ---
 
@@ -219,3 +250,4 @@ Shadows use dual layers for depth. Dark mode uses stronger shadows since contras
 - Don't use colors not defined in the token system
 - Don't add inline styles for colors — always use CSS classes or variables
 - Don't use dividers/`<hr>` — use spacing or background shifts
+- Don't use different design tokens than the web app — keep `packages/theme/src/tokens.css` as the single source of truth

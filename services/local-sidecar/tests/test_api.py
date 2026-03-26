@@ -128,3 +128,37 @@ def test_transcription_chunk_returns_structured_error_fields(tmp_path):
     }
     assert "recoverable" in payload
     assert payload["segment_id"] == 7
+
+
+def test_storage_and_folder_endpoints(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
+    )
+    client = TestClient(create_app(settings))
+
+    root = client.get("/storage/local-root")
+    assert root.status_code == 200
+    assert "local_root" in root.json()
+
+    folder = client.post("/folders", json={"name": "Meetings"})
+    assert folder.status_code == 201
+    folder_id = folder.json()["id"]
+
+    note = client.post("/notes", json={"title": "N1", "body": "Hello", "tags": []})
+    assert note.status_code == 201
+    note_id = note.json()["frontmatter"]["id"]
+
+    moved = client.patch(f"/notes/{note_id}/move", json={"folder_id": folder_id})
+    assert moved.status_code == 200
+    assert moved.json()["frontmatter"]["folder_id"] == folder_id
+
+    pref = client.put("/storage/preference", json={"mode": "local_and_drive"})
+    assert pref.status_code == 200
+    assert pref.json()["mode"] == "local_and_drive"
+
+    sync_status = client.get("/sync/status")
+    assert sync_status.status_code == 200
+    assert sync_status.json()["enabled"] is True
