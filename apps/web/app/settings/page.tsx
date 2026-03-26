@@ -1,9 +1,11 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UICard, UIButton, UIInput } from '@notebook-ai/ui';
 import { saveProviderByok, saveStoragePreference } from '../../lib/cloud';
+import { getSupabaseClient, isSupabaseConfigured } from '../../lib/supabase';
 import { ThemeToggle } from '../components/ThemeToggle';
 
 function KeyIcon() {
@@ -31,12 +33,14 @@ function CheckCircleIcon() {
 }
 
 export default function SettingsPage() {
+  const router = useRouter();
   const [userId, setUserId] = useState('');
   const [openaiKey, setOpenaiKey] = useState('');
   const [openrouterKey, setOpenrouterKey] = useState('');
   const [mode, setMode] = useState<'local' | 'local_and_drive'>('local');
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     setUserId(localStorage.getItem('notebook_web_user_id') || '');
@@ -62,12 +66,30 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleSignOut() {
+    setSigningOut(true);
+    setStatus('');
+    try {
+      if (isSupabaseConfigured()) {
+        const supabase = getSupabaseClient();
+        const { error } = await supabase.auth.signOut();
+        if (error) throw error;
+      }
+      localStorage.removeItem('notebook_web_user_id');
+      localStorage.removeItem('notebook_web_user_email');
+      router.replace('/auth/signin');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Failed to sign out.');
+      setSigningOut(false);
+    }
+  }
+
   return (
     <main className="web-shell">
       <section className="container animate-fade-in-up" style={{ maxWidth: 720 }}>
         {/* Breadcrumb */}
         <nav className="breadcrumb">
-          <Link href="/">Home</Link>
+          <Link href="/home">Home</Link>
           <span className="breadcrumb-sep">›</span>
           <span style={{ color: 'var(--text)' }}>Settings</span>
         </nav>
@@ -78,7 +100,16 @@ export default function SettingsPage() {
               <h1 style={{ margin: '0 0 4px', fontSize: '1.5rem', letterSpacing: '-0.02em', fontWeight: 700 }}>Settings</h1>
               <p className="muted" style={{ margin: 0, fontSize: '0.88rem' }}>Manage your AI providers and storage preferences.</p>
             </div>
-            <ThemeToggle />
+            <div className="row">
+              <ThemeToggle />
+              <UIButton variant="ghost" onClick={() => { void handleSignOut(); }} disabled={signingOut}>
+                {signingOut ? (
+                  <><span className="spinner" /> Signing out...</>
+                ) : (
+                  'Sign out'
+                )}
+              </UIButton>
+            </div>
           </div>
 
           {/* User */}

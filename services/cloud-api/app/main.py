@@ -19,6 +19,7 @@ from .models import (
     DesktopAuthExchangeCompleteResponse,
     DesktopAuthExchangeInitRequest,
     DesktopAuthExchangeInitResponse,
+    DesktopAuthExchangePollResponse,
     DriveConnectionStatus,
     GoogleDriveByokRequest,
     GoogleDriveTokenResponse,
@@ -140,6 +141,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         raise HTTPException(status_code=400, detail="Provide either code or (state + user_id)")
+
+    @app.get("/auth/desktop/exchange/poll", response_model=DesktopAuthExchangePollResponse)
+    async def desktop_auth_exchange_poll(
+        state: str = Query(...),
+    ) -> DesktopAuthExchangePollResponse:
+        record = vault.get_desktop_auth_state(state)
+        if not record:
+            return DesktopAuthExchangePollResponse(ready=False)
+
+        session_token, expires = create_app_session_token(record.user_id, current_settings)
+        return DesktopAuthExchangePollResponse(
+            ready=True,
+            session_token=session_token,
+            user_id=record.user_id,
+            expires_in_seconds=expires,
+            onboarding_complete=record.onboarding_complete,
+        )
 
     @app.get("/legal/current", response_model=LegalCurrentResponse)
     async def legal_current() -> LegalCurrentResponse:

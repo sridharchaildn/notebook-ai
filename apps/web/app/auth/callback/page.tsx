@@ -18,6 +18,8 @@ export default function AuthCallbackPage() {
   const [status, setStatus] = useState('Completing sign in...');
   const [error, setError] = useState('');
   const [stage, setStage] = useState<'session' | 'legal' | 'handoff' | 'done'>('session');
+  const [desktopFlow, setDesktopFlow] = useState(false);
+  const [manualDesktopLink, setManualDesktopLink] = useState<string | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -32,6 +34,7 @@ export default function AuthCallbackPage() {
         const code = params.get('code');
         const desktopState = params.get('state');
         const intent = params.get('intent') === 'signup' ? 'signup' : 'signin';
+        setDesktopFlow(Boolean(desktopState));
         const supabase = getSupabaseClient();
 
         if (code) {
@@ -75,7 +78,11 @@ export default function AuthCallbackPage() {
           setStatus('Returning to desktop app...');
           const result = await completeDesktopExchange(desktopState, user.id);
           if (result.deep_link_url) {
+            setManualDesktopLink(result.deep_link_url);
             window.location.href = result.deep_link_url;
+            window.setTimeout(() => {
+              setStatus('If desktop did not open, click Open Desktop App below.');
+            }, 1800);
             return;
           }
         }
@@ -84,7 +91,7 @@ export default function AuthCallbackPage() {
         if (desktopState) next.set('state', desktopState);
         setStage('done');
         setStatus('Sign in complete. Redirecting...');
-        router.replace(intent === 'signin' && !desktopState ? '/settings' : `/onboarding?${next.toString()}`);
+        router.replace(intent === 'signin' && !desktopState ? '/home' : `/onboarding?${next.toString()}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unable to complete sign in.');
       }
@@ -130,6 +137,16 @@ export default function AuthCallbackPage() {
                       ? 'Preparing desktop handoff'
                       : 'Done'}
               </div>
+            </div>
+          ) : null}
+          {!error && desktopFlow ? (
+            <div className="row" style={{ marginTop: 14 }}>
+              <a href={manualDesktopLink || 'notebook-ai://open'}>
+                <UIButton variant="ghost">Open Desktop App</UIButton>
+              </a>
+              <Link href="/home">
+                <UIButton variant="ghost">Continue on web</UIButton>
+              </Link>
             </div>
           ) : null}
           {error ? (

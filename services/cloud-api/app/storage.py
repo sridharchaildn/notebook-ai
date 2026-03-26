@@ -258,6 +258,27 @@ class CredentialVault:
                 onboarding_complete=bool(row["onboarding_complete"]),
             )
 
+    def get_desktop_auth_state(self, state: str) -> DesktopAuthCodeRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state, user_id, expires_at, consumed_at FROM desktop_auth_states WHERE state = ?",
+                (state,),
+            ).fetchone()
+            if not row:
+                return None
+
+            user_id = str(row["user_id"]) if row["user_id"] else None
+            consumed_at = str(row["consumed_at"]) if row["consumed_at"] else None
+            expires_at = _parse_datetime(str(row["expires_at"]))
+            if not user_id or not consumed_at or not expires_at or expires_at <= datetime.now(UTC):
+                return None
+
+            return DesktopAuthCodeRecord(
+                code="",
+                user_id=user_id,
+                onboarding_complete=True,
+            )
+
     def upsert_storage_preference(self, user_id: str, mode: str, local_root: str | None) -> StoragePreference:
         now = datetime.now(UTC).isoformat()
         with self._connect() as conn:

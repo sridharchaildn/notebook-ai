@@ -37,8 +37,16 @@ class DesktopAuthExchangeCompleteRequest(BaseModel):
 
 
 class DesktopAuthExchangeCompleteResponse(BaseModel):
-    deep_link_url: str | None = None
-    code: str | None = None
+  deep_link_url: str | None = None
+  code: str | None = None
+  session_token: str | None = None
+  user_id: str | None = None
+  expires_in_seconds: int | None = None
+  onboarding_complete: bool | None = None
+
+
+class DesktopAuthExchangePollResponse(BaseModel):
+    ready: bool = False
     session_token: str | None = None
     user_id: str | None = None
     expires_in_seconds: int | None = None

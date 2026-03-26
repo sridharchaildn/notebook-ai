@@ -5,6 +5,7 @@ declare global {
     notebookDesktop: {
       openExternal: (url: string) => Promise<void>;
       chooseDirectory: () => Promise<string | null>;
+      consumeAuthCallback: () => Promise<string | null>;
       onAuthCallback: (handler: (url: string) => void) => () => void;
     };
   }

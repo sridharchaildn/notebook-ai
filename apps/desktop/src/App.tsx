@@ -29,6 +29,7 @@ import {
   fetchStoragePreference,
   fetchSyncStatus,
   openOpenAIOAuth,
+  pollDesktopAuthState,
   runSyncNow,
   setLocalRoot,
   startDesktopAuthFlow,
@@ -104,15 +105,16 @@ export default function App() {
   const [byokProvider, setByokProvider] = useState<'openai' | 'openrouter'>('openai');
   const [byokValue, setByokValue] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [showSplash, setShowSplash] = useState(() => {
-    return !localStorage.getItem('notebook_has_visited');
-  });
-  const [manualSignInUrl, setManualSignInUrl] = useState<string | null>(null);
-  const [authBusy, setAuthBusy] = useState(false);
-  const [logoutBusy, setLogoutBusy] = useState(false);
   const [sessionUserId, setSessionUserId] = useState<string | null>(
     () => localStorage.getItem('notebook_session_user_id') ?? null,
   );
+  const [pendingDesktopAuthState, setPendingDesktopAuthState] = useState<string | null>(
+    () => localStorage.getItem('notebook_pending_desktop_auth_state') ?? null,
+  );
+  const [showSplash, setShowSplash] = useState(() => !localStorage.getItem('notebook_session_user_id'));
+  const [manualSignInUrl, setManualSignInUrl] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
   const [storagePreference, setStoragePreference] = useState<StoragePreference>({
     mode: 'local',
     local_root: null,
@@ -177,6 +179,7 @@ export default function App() {
   const interviewThreadRef = useRef<HTMLDivElement | null>(null);
   const interviewBottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollInterviewRef = useRef(true);
+  const authPollErrorShownRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -256,13 +259,67 @@ export default function App() {
     if (!window.notebookDesktop?.onAuthCallback) {
       return;
     }
+
+    let disposed = false;
+    const tryConsumePending = async () => {
+      try {
+        const url = await window.notebookDesktop.consumeAuthCallback?.();
+        if (!disposed && url) {
+          void handleDesktopAuthCallback(url);
+        }
+      } catch {
+        /* ignore pending callback drain errors */
+      }
+    };
+
+    void tryConsumePending();
+    const pollTimer = window.setInterval(() => {
+      if (sessionUserId) return;
+      void tryConsumePending();
+    }, 1200);
+
     const unsubscribe = window.notebookDesktop.onAuthCallback((url) => {
       void handleDesktopAuthCallback(url);
     });
     return () => {
+      disposed = true;
+      window.clearInterval(pollTimer);
       unsubscribe();
     };
-  }, []);
+  }, [sessionUserId]);
+
+  useEffect(() => {
+    if (!showSplash || sessionUserId || !pendingDesktopAuthState) return;
+    let disposed = false;
+
+    const pollDesktopAuth = async () => {
+      try {
+        const status = await pollDesktopAuthState(pendingDesktopAuthState);
+        if (!status.ready || !status.session_token || !status.user_id) {
+          return;
+        }
+        if (disposed) return;
+        applyDesktopSession(status.session_token, status.user_id);
+        setMessage('Signed in. Desktop is ready.');
+      } catch {
+        if (authPollErrorShownRef.current) return;
+        authPollErrorShownRef.current = true;
+        setMessage(
+          'Auth status check failed. Restart desktop + cloud API, then sign in again.',
+        );
+      }
+    };
+
+    void pollDesktopAuth();
+    const timer = window.setInterval(() => {
+      void pollDesktopAuth();
+    }, 1500);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [showSplash, sessionUserId, pendingDesktopAuthState]);
 
   useEffect(() => {
     void (async () => {
@@ -892,14 +949,53 @@ export default function App() {
     }
   }
 
+  function setPendingAuthState(state: string | null) {
+    if (state) {
+      localStorage.setItem('notebook_pending_desktop_auth_state', state);
+      setPendingDesktopAuthState(state);
+      authPollErrorShownRef.current = false;
+      return;
+    }
+    localStorage.removeItem('notebook_pending_desktop_auth_state');
+    setPendingDesktopAuthState(null);
+    authPollErrorShownRef.current = false;
+  }
+
+  function applyDesktopSession(sessionToken: string, userId: string) {
+    localStorage.setItem('notebook_has_visited', 'true');
+    localStorage.setItem('notebook_session_token', sessionToken);
+    localStorage.setItem('notebook_session_user_id', userId);
+    setPendingAuthState(null);
+    setSessionUserId(userId);
+    setShowSplash(false);
+  }
+
   async function handleStartDesktopSignIn() {
     if (authBusy) return;
+    if (pendingDesktopAuthState && !sessionUserId) {
+      if (manualSignInUrl) {
+        try {
+          await window.notebookDesktop.openExternal(manualSignInUrl);
+          setMessage('Re-opened sign-in in browser. Complete auth there.');
+        } catch {
+          setMessage('Sign-in is still pending in browser. Complete auth to continue.');
+        }
+      } else {
+        setMessage('Sign-in is in progress. Complete auth in your browser.');
+      }
+      return;
+    }
     setManualSignInUrl(null);
     setAuthBusy(true);
     try {
-      const authUrl = await startDesktopAuthFlow();
+      const { authUrl, state, browserOpened } = await startDesktopAuthFlow();
       setManualSignInUrl(authUrl);
-      setMessage('Sign in started. If browser did not open, use the button below.');
+      setPendingAuthState(state);
+      if (browserOpened) {
+        setMessage('Complete sign in in browser. Desktop will continue automatically.');
+      } else {
+        setMessage('Browser did not open automatically. Use Open Sign-In Page below.');
+      }
     } catch (error) {
       const fallback = 'Unable to open browser automatically.';
       if (error instanceof Error) {
@@ -923,20 +1019,17 @@ export default function App() {
       const parsed = new URL(rawUrl);
       const code = parsed.searchParams.get('code');
       if (!code) {
-        setMessage('Sign-in callback missing code.');
+        setMessage('Desktop opened, but no sign-in code was found. Click Sign In again from splash.');
         return;
       }
+      setMessage('Finishing desktop sign in...');
       const response = await completeDesktopAuth(code);
       if (!response.session_token || !response.user_id) {
         setMessage('Unable to complete sign in.');
         return;
       }
 
-      localStorage.setItem('notebook_has_visited', 'true');
-      localStorage.setItem('notebook_session_token', response.session_token);
-      localStorage.setItem('notebook_session_user_id', response.user_id);
-      setSessionUserId(response.user_id);
-      setShowSplash(false);
+      applyDesktopSession(response.session_token, response.user_id);
       setMessage('Signed in. Desktop is ready.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Desktop sign in failed');
@@ -972,8 +1065,10 @@ export default function App() {
     if (!sessionUserId || logoutBusy) return;
     setLogoutBusy(true);
     try {
+      localStorage.removeItem('notebook_has_visited');
       localStorage.removeItem('notebook_session_token');
       localStorage.removeItem('notebook_session_user_id');
+      setPendingAuthState(null);
       setSessionUserId(null);
       setManualSignInUrl(null);
       setShowSplash(true);
@@ -1366,6 +1461,7 @@ export default function App() {
   }, []);
 
   if (showSplash) {
+    const authPending = Boolean(pendingDesktopAuthState && !sessionUserId);
     return (
       <SplashScreen
         onLogin={() => {
@@ -1377,6 +1473,7 @@ export default function App() {
           void handleStartDesktopSignIn();
         }}
         authBusy={authBusy}
+        authPending={authPending}
         sessionUserId={sessionUserId}
         statusMessage={message}
         manualSignInUrl={manualSignInUrl}

@@ -142,6 +142,51 @@ def test_desktop_auth_exchange_round_trip(tmp_path):
     assert isinstance(complete_desktop_res.json()["session_token"], str)
 
 
+def test_desktop_auth_exchange_poll_round_trip(tmp_path):
+    settings = Settings(
+        database_path=tmp_path / "cloud.db",
+        app_jwt_secret="desktop-secret",
+        web_app_url="http://127.0.0.1:3000",
+        desktop_auth_path="/desktop/auth",
+        desktop_callback_scheme="notebook-ai://auth/callback",
+    )
+    client = TestClient(create_app(settings))
+
+    init_res = client.post("/auth/desktop/exchange/init", json={"device_label": "MacBook"})
+    assert init_res.status_code == 200
+    state = init_res.json()["state"]
+
+    docs_res = client.get("/legal/current")
+    docs = docs_res.json()["documents"]
+    accept_res = client.post(
+        "/legal/accept",
+        json={
+            "user_id": "desktop-user",
+            "acceptances": [
+                {"type": "privacy_policy", "version": docs[0]["version"]},
+                {"type": "user_agreement", "version": docs[1]["version"]},
+            ],
+        },
+    )
+    assert accept_res.status_code == 200
+
+    pre_poll = client.get("/auth/desktop/exchange/poll", params={"state": state})
+    assert pre_poll.status_code == 200
+    assert pre_poll.json()["ready"] is False
+
+    complete_web_res = client.post(
+        "/auth/desktop/exchange/complete",
+        json={"state": state, "user_id": "desktop-user"},
+    )
+    assert complete_web_res.status_code == 200
+
+    poll_res = client.get("/auth/desktop/exchange/poll", params={"state": state})
+    assert poll_res.status_code == 200
+    assert poll_res.json()["ready"] is True
+    assert poll_res.json()["user_id"] == "desktop-user"
+    assert isinstance(poll_res.json()["session_token"], str)
+
+
 def test_legal_storage_and_drive_status(tmp_path):
     settings = Settings(
         database_path=tmp_path / "cloud.db",

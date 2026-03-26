@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let sidecarProcess: ChildProcess | null = null;
 let cloudApiProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
+const pendingDeepLinks: string[] = [];
 
 function isPortOpen(port: number, host = '127.0.0.1') {
   return new Promise<boolean>((resolve) => {
@@ -131,6 +132,10 @@ function createWindow() {
     void window.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
+  window.webContents.on('did-finish-load', () => {
+    flushPendingDeepLinks();
+  });
+
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
       void openUrlOutsideApp(url);
@@ -150,6 +155,11 @@ function createWindow() {
 
 function handleAuthCallbackUrl(rawUrl: string) {
   if (!rawUrl.startsWith('notebook-ai://')) return;
+  process.stdout.write(`[auth] Received deep link: ${rawUrl}\n`);
+  pendingDeepLinks.push(rawUrl);
+  if (pendingDeepLinks.length > 12) {
+    pendingDeepLinks.shift();
+  }
   if (mainWindow) {
     mainWindow.webContents.send('auth:callback-url', rawUrl);
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -191,6 +201,23 @@ async function openUrlOutsideApp(url: string) {
   }
 }
 
+function registerDeepLinkProtocol() {
+  const protocol = 'notebook-ai';
+  if (process.defaultApp && process.argv.length >= 2) {
+    void app.setAsDefaultProtocolClient(protocol, process.execPath, [path.resolve(process.argv[1]!)]);
+    return;
+  }
+  void app.setAsDefaultProtocolClient(protocol);
+}
+
+function flushPendingDeepLinks() {
+  if (!mainWindow || pendingDeepLinks.length === 0) return;
+  const latest = pendingDeepLinks[pendingDeepLinks.length - 1];
+  if (!latest) return;
+  process.stdout.write('[auth] Flushing pending deep link to renderer\n');
+  mainWindow.webContents.send('auth:callback-url', latest);
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 }
@@ -205,8 +232,14 @@ app.on('second-instance', (_event, argv) => {
   focusOrCreateMainWindow();
 });
 
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleAuthCallbackUrl(url);
+  focusOrCreateMainWindow();
+});
+
 app.whenReady().then(async () => {
-  app.setAsDefaultProtocolClient('notebook-ai');
+  registerDeepLinkProtocol();
 
   await Promise.all([startSidecar(), startCloudApi()]);
 
@@ -245,12 +278,20 @@ app.whenReady().then(async () => {
     return result.filePaths[0];
   });
 
-  createWindow();
-
-  app.on('open-url', (event, url) => {
-    event.preventDefault();
-    handleAuthCallbackUrl(url);
+  ipcMain.handle('auth:consume-callback-url', () => {
+    if (pendingDeepLinks.length === 0) return null;
+    const latest = pendingDeepLinks[pendingDeepLinks.length - 1] ?? null;
+    pendingDeepLinks.length = 0;
+    process.stdout.write(`[auth] Renderer consumed deep link: ${latest ?? 'none'}\n`);
+    return latest;
   });
+
+  createWindow();
+  const launchDeepLink = process.argv.find((arg) => arg.startsWith('notebook-ai://'));
+  if (launchDeepLink) {
+    handleAuthCallbackUrl(launchDeepLink);
+  }
+  flushPendingDeepLinks();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

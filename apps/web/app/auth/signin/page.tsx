@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UIButton, UICard, UIInput } from '@notebook-ai/ui';
 import { AppLogo } from '../../components/AppLogo';
@@ -27,6 +28,7 @@ function GoogleIcon() {
 }
 
 export default function SignInPage() {
+  const router = useRouter();
   const [desktopState, setDesktopState] = useState<string | null>(null);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -35,14 +37,25 @@ export default function SignInPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    setDesktopState(params.get('state'));
+    const nextDesktopState = params.get('state');
+    setDesktopState(nextDesktopState);
 
     if (!isSupabaseConfigured()) return;
     const supabase = getSupabaseClient();
     void supabase.auth.getUser().then(({ data }) => {
-      if (data.user) setHasExistingSession(true);
+      if (!data.user) return;
+      setHasExistingSession(true);
+      setBusy(true);
+      if (nextDesktopState) {
+        setMessage('Existing session found. Returning to desktop...');
+        const next = new URLSearchParams({ intent: 'signin', state: nextDesktopState });
+        window.location.replace(`/auth/callback?${next.toString()}`);
+        return;
+      }
+      setMessage('Already signed in. Redirecting...');
+      router.replace('/home');
     });
-  }, []);
+  }, [router]);
 
   async function handleGoogleSignIn() {
     if (!isSupabaseConfigured()) {

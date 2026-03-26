@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UICard, UIButton, UIInput, UIPill } from '@notebook-ai/ui';
 import { cloudApiBaseUrl, completeDesktopExchange, saveProviderByok, saveStoragePreference } from '../../lib/cloud';
@@ -24,6 +25,7 @@ function CloudIcon() {
 }
 
 export default function OnboardingPage() {
+  const router = useRouter();
   const [userId, setUserId] = useState('');
   const [desktopState, setDesktopState] = useState<string | null>(null);
 
@@ -66,7 +68,8 @@ export default function OnboardingPage() {
         }
       }
 
-      setMessage('Onboarding complete. Download the macOS app to start recording.');
+      setMessage('Onboarding complete. Redirecting to home...');
+      router.replace('/home');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to save onboarding settings.');
     } finally {

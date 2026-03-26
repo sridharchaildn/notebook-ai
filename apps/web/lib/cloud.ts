@@ -1,5 +1,6 @@
 import type {
   DesktopAuthExchangeCompleteResponse,
+  DesktopAuthExchangeInitResponse,
   LegalAcceptanceRecord,
   LegalDocument,
   StoragePreference,
@@ -76,6 +77,25 @@ export async function completeDesktopExchange(state: string, userId: string): Pr
   });
   if (!res.ok) throw await parseError(res);
   return (await res.json()) as DesktopAuthExchangeCompleteResponse;
+}
+
+export async function initDesktopExchange(deviceLabel = 'Notebook AI Desktop'): Promise<DesktopAuthExchangeInitResponse> {
+  const res = await fetch(`${CLOUD_API_URL}/auth/desktop/exchange/init`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_label: deviceLabel }),
+  });
+  if (!res.ok) throw await parseError(res);
+  return (await res.json()) as DesktopAuthExchangeInitResponse;
+}
+
+export async function createDesktopSignInLink(userId: string): Promise<string> {
+  const init = await initDesktopExchange('Notebook AI Web');
+  const complete = await completeDesktopExchange(init.state, userId);
+  if (!complete.deep_link_url) {
+    throw new Error('Desktop handoff unavailable. Try signing in again.');
+  }
+  return complete.deep_link_url;
 }
 
 export function cloudApiBaseUrl(): string {

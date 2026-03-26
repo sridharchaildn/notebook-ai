@@ -170,3 +170,11 @@ export interface DesktopAuthExchangeCompleteResponse {
   expires_in_seconds?: number;
   onboarding_complete?: boolean;
 }
+
+export interface DesktopAuthExchangePollResponse {
+  ready: boolean;
+  session_token?: string;
+  user_id?: string;
+  expires_in_seconds?: number;
+  onboarding_complete?: boolean;
+}

@@ -3,6 +3,7 @@ import { BookOpen, Sparkles } from 'lucide-react';
 interface Props {
   onLogin: () => void;
   authBusy?: boolean;
+  authPending?: boolean;
   sessionUserId?: string | null;
   statusMessage?: string;
   manualSignInUrl?: string | null;
@@ -11,6 +12,7 @@ interface Props {
 export function SplashScreen({
   onLogin,
   authBusy = false,
+  authPending = false,
   sessionUserId = null,
   statusMessage = '',
   manualSignInUrl = null,
@@ -49,7 +51,7 @@ export function SplashScreen({
         </div>
 
         <button type="button" className="splash-login-btn" onClick={onLogin} disabled={authBusy}>
-          {authBusy ? 'Opening Sign In...' : sessionUserId ? 'Continue to Desktop' : 'Sign In on Web'}
+          {authBusy ? 'Opening Sign In...' : authPending ? 'Waiting for Sign In...' : 'Sign In'}
           <span className="splash-login-arrow">→</span>
         </button>
 

@@ -3,6 +3,7 @@ import type {
   AITransformType,
   DesktopAuthExchangeCompleteResponse,
   DesktopAuthExchangeInitResponse,
+  DesktopAuthExchangePollResponse,
   DriveConnectionStatus,
   FolderNode,
   InterviewCoachRequest,
@@ -227,7 +228,15 @@ export function openGoogleDriveConnect(): void {
   void window.notebookDesktop.openExternal(url);
 }
 
-export async function startDesktopAuthFlow(deviceLabel = 'Notebook AI Desktop'): Promise<string> {
+export interface StartDesktopAuthFlowResult {
+  authUrl: string;
+  state: string;
+  browserOpened: boolean;
+}
+
+export async function startDesktopAuthFlow(
+  deviceLabel = 'Notebook AI Desktop',
+): Promise<StartDesktopAuthFlowResult> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 8000);
 
@@ -259,20 +268,33 @@ export async function startDesktopAuthFlow(deviceLabel = 'Notebook AI Desktop'):
   const payload = (await res.json()) as DesktopAuthExchangeInitResponse;
   const authUrl = payload.auth_url || `${WEB_APP_URL}/desktop/auth`;
 
+  let browserOpened = false;
   if (window.notebookDesktop?.openExternal) {
     try {
       await window.notebookDesktop.openExternal(authUrl);
-      return authUrl;
+      browserOpened = true;
     } catch {
-      throw new Error(
-        `Could not open your default browser automatically. Open this URL manually: ${authUrl}`,
-      );
+      browserOpened = false;
     }
+  } else {
+    browserOpened = false;
   }
 
-  throw new Error(
-    `Desktop bridge unavailable. Open this URL manually: ${authUrl}`,
+  return {
+    authUrl,
+    state: payload.state,
+    browserOpened,
+  };
+}
+
+export async function pollDesktopAuthState(state: string): Promise<DesktopAuthExchangePollResponse> {
+  const res = await fetch(
+    `${CLOUD_BASE_URL}/auth/desktop/exchange/poll?state=${encodeURIComponent(state)}`,
   );
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to poll desktop sign-in status.');
+  }
+  return (await res.json()) as DesktopAuthExchangePollResponse;
 }
 
 export async function completeDesktopAuth(code: string): Promise<DesktopAuthExchangeCompleteResponse> {
@@ -282,7 +304,7 @@ export async function completeDesktopAuth(code: string): Promise<DesktopAuthExch
     body: JSON.stringify({ code }),
   });
   if (!res.ok) {
-    throw new Error('Unable to complete desktop sign in.');
+    throw await parseResponseError(res, 'Unable to complete desktop sign in.');
   }
   return (await res.json()) as DesktopAuthExchangeCompleteResponse;
 }
