@@ -1,17 +1,20 @@
 import type {
   AITransformRequest,
   AITransformType,
-  DesktopAuthExchangeCompleteResponse,
-  DesktopAuthExchangeInitResponse,
-  DesktopAuthExchangePollResponse,
+  ContentFormat,
   DriveConnectionStatus,
   FolderNode,
   InterviewCoachRequest,
   InterviewAssistRequest,
   InterviewTurnsRequest,
   InterviewTurnsResponse,
+  LegalAcceptanceRecord,
+  LegalDocument,
   MoveNoteRequest,
   NoteDocument,
+  NoteKind,
+  NoteSessionData,
+  OAuthStartResponse,
   ProviderConnection,
   ProviderId,
   StoragePreference,
@@ -21,15 +24,117 @@ import type {
 
 const LOCAL_BASE_URL = import.meta.env.VITE_LOCAL_API_URL ?? 'http://127.0.0.1:8787';
 const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? 'http://127.0.0.1:8790';
-const CLOUD_USER_ID = import.meta.env.VITE_CLOUD_USER_ID ?? 'local-dev-user';
-const WEB_APP_URL = import.meta.env.VITE_WEB_APP_URL ?? 'http://127.0.0.1:3000';
 
-function getDesktopSessionToken(): string | null {
+const AUTH_INVALID_EVENT = 'notebook:auth-invalid';
+const RENDERER_AUTH_SESSION_KEY = 'notebook-desktop-renderer-session';
+
+export interface DesktopRendererSession {
+  accessToken: string;
+  expiresAt: number | null;
+  userId: string;
+  userEmail: string | null;
+}
+
+let rendererSessionFallback: DesktopRendererSession | null = null;
+
+export class DesktopAuthExpiredError extends Error {
+  constructor(message = 'Session expired. Sign in again.') {
+    super(message);
+    this.name = 'DesktopAuthExpiredError';
+  }
+}
+
+function dispatchAuthInvalidEvent(message: string) {
+  window.dispatchEvent(new CustomEvent(AUTH_INVALID_EVENT, { detail: message }));
+}
+
+export function authInvalidEventName(): string {
+  return AUTH_INVALID_EVENT;
+}
+
+function parseRendererSessionFallback(rawValue: string | null): DesktopRendererSession | null {
+  if (!rawValue) return null;
   try {
-    return localStorage.getItem('notebook_session_token');
+    const payload = JSON.parse(rawValue) as Partial<DesktopRendererSession>;
+    if (
+      typeof payload.accessToken !== 'string' ||
+      typeof payload.userId !== 'string' ||
+      payload.userId.trim().length === 0
+    ) {
+      return null;
+    }
+    return {
+      accessToken: payload.accessToken,
+      expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : null,
+      userId: payload.userId,
+      userEmail: typeof payload.userEmail === 'string' ? payload.userEmail : null,
+    };
   } catch {
     return null;
   }
+}
+
+export function getRendererSessionFallback(): DesktopRendererSession | null {
+  if (rendererSessionFallback) return rendererSessionFallback;
+  if (typeof window === 'undefined') return null;
+  const parsed = parseRendererSessionFallback(window.localStorage.getItem(RENDERER_AUTH_SESSION_KEY));
+  rendererSessionFallback = parsed;
+  return parsed;
+}
+
+export function setRendererSessionFallback(session: DesktopRendererSession | null) {
+  rendererSessionFallback = session;
+  if (typeof window === 'undefined') return;
+  if (session) {
+    window.localStorage.setItem(RENDERER_AUTH_SESSION_KEY, JSON.stringify(session));
+    return;
+  }
+  window.localStorage.removeItem(RENDERER_AUTH_SESSION_KEY);
+}
+
+async function getDesktopAuthSession() {
+  const bridgeSession = await window.notebookDesktop?.getAuthSession?.();
+  if (bridgeSession?.userId) {
+    setRendererSessionFallback(bridgeSession);
+    return bridgeSession;
+  }
+  return getRendererSessionFallback();
+}
+
+async function getDesktopAccessToken(): Promise<string | null> {
+  return (await getDesktopAuthSession())?.accessToken ?? null;
+}
+
+async function clearDesktopAuthSession(message = 'Session expired. Sign in again.') {
+  try {
+    await window.notebookDesktop?.clearAuthSession?.();
+  } finally {
+    setRendererSessionFallback(null);
+    dispatchAuthInvalidEvent(message);
+  }
+}
+
+async function authorizedCloudHeaders(
+  contentType: 'json' | 'none' = 'json',
+): Promise<Record<string, string>> {
+  const accessToken = await getDesktopAccessToken();
+  if (!accessToken) {
+    throw new DesktopAuthExpiredError('Sign in required.');
+  }
+  return {
+    ...(contentType === 'json' ? { 'Content-Type': 'application/json' } : {}),
+    Authorization: `Bearer ${accessToken}`,
+  };
+}
+
+async function localAuthHeaders(
+  contentType: 'json' | 'none' = 'json',
+): Promise<Record<string, string>> {
+  const accessToken = await getDesktopAccessToken();
+  return {
+    ...(contentType === 'json' ? { 'Content-Type': 'application/json' } : {}),
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+  };
 }
 
 async function parseResponseError(res: Response, fallback: string): Promise<Error> {
@@ -44,17 +149,66 @@ async function parseResponseError(res: Response, fallback: string): Promise<Erro
   return new Error(fallback);
 }
 
+async function openExternalUrl(url: string): Promise<void> {
+  if (window.notebookDesktop?.openExternal) {
+    await window.notebookDesktop.openExternal(url);
+    return;
+  }
+
+  const opened = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!opened) {
+    throw new Error('Unable to open browser automatically.');
+  }
+}
+
+async function cloudFetch(
+  input: string,
+  init: RequestInit = {},
+  fallback = 'Cloud request failed.',
+): Promise<Response> {
+  const headers = {
+    ...(await authorizedCloudHeaders(init.body ? 'json' : 'none')),
+    ...(init.headers ?? {}),
+  };
+  const response = await fetch(`${CLOUD_BASE_URL}${input}`, { ...init, headers });
+  if (response.status === 401) {
+    await clearDesktopAuthSession();
+    throw new DesktopAuthExpiredError();
+  }
+  if (!response.ok) {
+    throw await parseResponseError(response, fallback);
+  }
+  return response;
+}
+
+async function startOAuthFlow(path: string): Promise<OAuthStartResponse> {
+  const response = await cloudFetch(
+    path,
+    {
+      method: 'POST',
+      headers: await authorizedCloudHeaders('json'),
+    },
+    'Unable to start OAuth connection.',
+  );
+  return (await response.json()) as OAuthStartResponse;
+}
+
 export interface SaveNoteInput {
   id: string;
   title: string;
-  body: string;
+  content: string;
   tags: string[];
   provider?: ProviderId;
   model?: string;
+  kind?: NoteKind;
+  content_format?: ContentFormat;
+  session?: NoteSessionData | null;
 }
 
 export async function fetchNotes(query = ''): Promise<NoteDocument[]> {
-  const res = await fetch(`${LOCAL_BASE_URL}/notes?query=${encodeURIComponent(query)}`);
+  const res = await fetch(`${LOCAL_BASE_URL}/notes?query=${encodeURIComponent(query)}`, {
+    headers: await localAuthHeaders('none'),
+  });
   if (!res.ok) {
     throw new Error('Failed to load notes.');
   }
@@ -64,7 +218,7 @@ export async function fetchNotes(query = ''): Promise<NoteDocument[]> {
 export async function createNote(payload: Omit<SaveNoteInput, 'id'>): Promise<NoteDocument> {
   const res = await fetch(`${LOCAL_BASE_URL}/notes`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -76,7 +230,7 @@ export async function createNote(payload: Omit<SaveNoteInput, 'id'>): Promise<No
 export async function updateNote(payload: SaveNoteInput): Promise<NoteDocument> {
   const res = await fetch(`${LOCAL_BASE_URL}/notes/${payload.id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -88,6 +242,7 @@ export async function updateNote(payload: SaveNoteInput): Promise<NoteDocument> 
 export async function deleteNote(noteId: string): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/notes/${encodeURIComponent(noteId)}`, {
     method: 'DELETE',
+    headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
     throw new Error('Failed to delete note.');
@@ -97,7 +252,7 @@ export async function deleteNote(noteId: string): Promise<void> {
 export async function moveNote(noteId: string, payload: MoveNoteRequest): Promise<NoteDocument> {
   const res = await fetch(`${LOCAL_BASE_URL}/notes/${encodeURIComponent(noteId)}/move`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -107,7 +262,9 @@ export async function moveNote(noteId: string, payload: MoveNoteRequest): Promis
 }
 
 export async function fetchFolders(): Promise<FolderNode[]> {
-  const res = await fetch(`${LOCAL_BASE_URL}/folders`);
+  const res = await fetch(`${LOCAL_BASE_URL}/folders`, {
+    headers: await localAuthHeaders('none'),
+  });
   if (!res.ok) {
     throw new Error('Failed to load folders.');
   }
@@ -117,7 +274,7 @@ export async function fetchFolders(): Promise<FolderNode[]> {
 export async function createFolder(name: string): Promise<FolderNode> {
   const res = await fetch(`${LOCAL_BASE_URL}/folders`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify({ name }),
   });
   if (!res.ok) {
@@ -129,7 +286,7 @@ export async function createFolder(name: string): Promise<FolderNode> {
 export async function renameFolder(folderId: string, name: string): Promise<FolderNode> {
   const res = await fetch(`${LOCAL_BASE_URL}/folders/${encodeURIComponent(folderId)}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify({ name }),
   });
   if (!res.ok) {
@@ -141,6 +298,7 @@ export async function renameFolder(folderId: string, name: string): Promise<Fold
 export async function deleteFolder(folderId: string): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/folders/${encodeURIComponent(folderId)}`, {
     method: 'DELETE',
+    headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
     throw new Error('Failed to delete folder.');
@@ -148,7 +306,9 @@ export async function deleteFolder(folderId: string): Promise<void> {
 }
 
 export async function fetchLocalRoot(): Promise<string> {
-  const res = await fetch(`${LOCAL_BASE_URL}/storage/local-root`);
+  const res = await fetch(`${LOCAL_BASE_URL}/storage/local-root`, {
+    headers: await localAuthHeaders('none'),
+  });
   if (!res.ok) {
     throw new Error('Failed to load local storage folder.');
   }
@@ -159,7 +319,7 @@ export async function fetchLocalRoot(): Promise<string> {
 export async function setLocalRoot(localRoot: string): Promise<string> {
   const res = await fetch(`${LOCAL_BASE_URL}/storage/local-root`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify({ local_root: localRoot }),
   });
   if (!res.ok) {
@@ -170,7 +330,9 @@ export async function setLocalRoot(localRoot: string): Promise<string> {
 }
 
 export async function fetchStoragePreference(): Promise<StoragePreference> {
-  const res = await fetch(`${LOCAL_BASE_URL}/storage/preference`);
+  const res = await fetch(`${LOCAL_BASE_URL}/storage/preference`, {
+    headers: await localAuthHeaders('none'),
+  });
   if (!res.ok) {
     throw new Error('Failed to load storage preference.');
   }
@@ -180,7 +342,7 @@ export async function fetchStoragePreference(): Promise<StoragePreference> {
 export async function updateStoragePreference(mode: StoragePreference['mode']): Promise<StoragePreference> {
   const res = await fetch(`${LOCAL_BASE_URL}/storage/preference`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify({ mode }),
   });
   if (!res.ok) {
@@ -190,7 +352,9 @@ export async function updateStoragePreference(mode: StoragePreference['mode']): 
 }
 
 export async function fetchSyncStatus(): Promise<SyncStatus> {
-  const res = await fetch(`${LOCAL_BASE_URL}/sync/status`);
+  const res = await fetch(`${LOCAL_BASE_URL}/sync/status`, {
+    headers: await localAuthHeaders('none'),
+  });
   if (!res.ok) {
     throw new Error('Failed to load sync status.');
   }
@@ -200,6 +364,7 @@ export async function fetchSyncStatus(): Promise<SyncStatus> {
 export async function runSyncNow(): Promise<SyncStatus> {
   const res = await fetch(`${LOCAL_BASE_URL}/sync/run`, {
     method: 'POST',
+    headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
     throw new Error('Failed to run sync.');
@@ -208,113 +373,64 @@ export async function runSyncNow(): Promise<SyncStatus> {
 }
 
 export async function fetchGoogleDriveStatus(): Promise<DriveConnectionStatus> {
-  const sessionToken = getDesktopSessionToken();
-  const query = sessionToken
-    ? `session_token=${encodeURIComponent(sessionToken)}`
-    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
-  const res = await fetch(`${CLOUD_BASE_URL}/integrations/google-drive/status?${query}`);
-  if (!res.ok) {
-    throw new Error('Failed to load Google Drive status.');
-  }
-  return (await res.json()) as DriveConnectionStatus;
-}
-
-export function openGoogleDriveConnect(): void {
-  const sessionToken = getDesktopSessionToken();
-  const query = sessionToken
-    ? `session_token=${encodeURIComponent(sessionToken)}`
-    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
-  const url = `${CLOUD_BASE_URL}/integrations/google-drive/oauth/start?${query}`;
-  void window.notebookDesktop.openExternal(url);
-}
-
-export interface StartDesktopAuthFlowResult {
-  authUrl: string;
-  state: string;
-  browserOpened: boolean;
-}
-
-export async function startDesktopAuthFlow(
-  deviceLabel = 'Notebook AI Desktop',
-): Promise<StartDesktopAuthFlowResult> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 8000);
-
-  let res: Response;
-  try {
-    res = await fetch(`${CLOUD_BASE_URL}/auth/desktop/exchange/init`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_label: deviceLabel }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if ((error as { name?: string })?.name === 'AbortError') {
-      throw new Error(
-        `Desktop sign in timed out. Verify cloud API is running at ${CLOUD_BASE_URL}.`,
-      );
-    }
-    throw new Error(
-      `Unable to reach cloud API at ${CLOUD_BASE_URL}. Start services/cloud-api first.`,
-    );
-  } finally {
-    window.clearTimeout(timeout);
-  }
-
-  if (!res.ok) {
-    throw await parseResponseError(res, 'Unable to start desktop sign in.');
-  }
-
-  const payload = (await res.json()) as DesktopAuthExchangeInitResponse;
-  const authUrl = payload.auth_url || `${WEB_APP_URL}/desktop/auth`;
-
-  let browserOpened = false;
-  if (window.notebookDesktop?.openExternal) {
-    try {
-      await window.notebookDesktop.openExternal(authUrl);
-      browserOpened = true;
-    } catch {
-      browserOpened = false;
-    }
-  } else {
-    browserOpened = false;
-  }
-
-  return {
-    authUrl,
-    state: payload.state,
-    browserOpened,
-  };
-}
-
-export async function pollDesktopAuthState(state: string): Promise<DesktopAuthExchangePollResponse> {
-  const res = await fetch(
-    `${CLOUD_BASE_URL}/auth/desktop/exchange/poll?state=${encodeURIComponent(state)}`,
+  const response = await cloudFetch(
+    '/integrations/google-drive/status',
+    { headers: await authorizedCloudHeaders('none') },
+    'Failed to load Google Drive status.',
   );
-  if (!res.ok) {
-    throw await parseResponseError(res, 'Unable to poll desktop sign-in status.');
-  }
-  return (await res.json()) as DesktopAuthExchangePollResponse;
+  return (await response.json()) as DriveConnectionStatus;
 }
 
-export async function completeDesktopAuth(code: string): Promise<DesktopAuthExchangeCompleteResponse> {
-  const res = await fetch(`${CLOUD_BASE_URL}/auth/desktop/exchange/complete`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code }),
-  });
+export async function openGoogleDriveConnect(): Promise<void> {
+  const payload = await startOAuthFlow('/integrations/google-drive/oauth/start');
+  await openExternalUrl(payload.url);
+}
+
+export async function logoutCloudSession(): Promise<void> {
+  await cloudFetch(
+    '/auth/logout',
+    {
+      method: 'POST',
+      headers: await authorizedCloudHeaders('json'),
+    },
+    'Unable to sign out of cloud session.',
+  );
+}
+
+export async function fetchLegalDocuments(): Promise<LegalDocument[]> {
+  const res = await fetch(`${CLOUD_BASE_URL}/legal/current`, { cache: 'no-store' });
   if (!res.ok) {
-    throw await parseResponseError(res, 'Unable to complete desktop sign in.');
+    throw await parseResponseError(res, 'Unable to load legal documents.');
   }
-  return (await res.json()) as DesktopAuthExchangeCompleteResponse;
+  const payload = (await res.json()) as { documents: LegalDocument[] };
+  return payload.documents;
+}
+
+export async function fetchLegalAcceptances(): Promise<LegalAcceptanceRecord[]> {
+  const response = await cloudFetch(
+    '/legal/accept',
+    { headers: await authorizedCloudHeaders('none') },
+    'Unable to load legal acceptance status.',
+  );
+  return (await response.json()) as LegalAcceptanceRecord[];
+}
+
+export async function acceptLegalDocuments(
+  acceptances: Array<{ type: 'privacy_policy' | 'user_agreement'; version: string }>,
+): Promise<LegalAcceptanceRecord[]> {
+  const response = await cloudFetch(
+    '/legal/accept',
+    {
+      method: 'POST',
+      headers: await authorizedCloudHeaders('json'),
+      body: JSON.stringify({ acceptances }),
+    },
+    'Unable to accept legal documents.',
+  );
+  return (await response.json()) as LegalAcceptanceRecord[];
 }
 
 export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
-  const sessionToken = getDesktopSessionToken();
-  const cloudQuery = sessionToken
-    ? `session_token=${encodeURIComponent(sessionToken)}`
-    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
-
   const [local, cloud] = await Promise.all([
     fetch(`${LOCAL_BASE_URL}/providers/status`)
       .then(async (res) => {
@@ -322,12 +438,12 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
         return (await res.json()) as ProviderConnection[];
       })
       .catch(() => [] as ProviderConnection[]),
-    fetch(`${CLOUD_BASE_URL}/providers/status?${cloudQuery}`)
-      .then(async (res) => {
-        if (!res.ok) return [] as ProviderConnection[];
-        return (await res.json()) as ProviderConnection[];
-      })
-      .catch(() => [] as ProviderConnection[]),
+    cloudFetch('/providers/status', { headers: await authorizedCloudHeaders('none') }, 'Unable to load provider status')
+      .then(async (res) => (await res.json()) as ProviderConnection[])
+      .catch((error) => {
+        if (error instanceof DesktopAuthExpiredError) throw error;
+        return [] as ProviderConnection[];
+      }),
   ]);
 
   if (local.length === 0 && cloud.length === 0) {
@@ -335,11 +451,9 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
   }
 
   const merged = new Map<string, ProviderConnection>();
-
   for (const status of local) {
     merged.set(status.provider, status);
   }
-
   for (const status of cloud) {
     const existing = merged.get(status.provider);
     if (!existing || (!existing.connected && status.connected)) {
@@ -351,21 +465,18 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
 }
 
 export async function storeByok(provider: ProviderId, apiKey: string): Promise<void> {
-  const sessionToken = getDesktopSessionToken();
-  const res = await fetch(`${CLOUD_BASE_URL}/providers/byok`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      provider,
-      api_key: apiKey,
-      user_id: CLOUD_USER_ID,
-      session_token: sessionToken,
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error('Unable to save provider key.');
-  }
+  await cloudFetch(
+    '/providers/byok',
+    {
+      method: 'POST',
+      headers: await authorizedCloudHeaders('json'),
+      body: JSON.stringify({
+        provider,
+        api_key: apiKey,
+      }),
+    },
+    'Unable to save provider key.',
+  );
 
   await fetch(`${LOCAL_BASE_URL}/providers/status/cache`, {
     method: 'POST',
@@ -374,43 +485,20 @@ export async function storeByok(provider: ProviderId, apiKey: string): Promise<v
   });
 }
 
-export function openOpenAIOAuth(): void {
-  const sessionToken = getDesktopSessionToken();
-  const query = sessionToken
-    ? `session_token=${encodeURIComponent(sessionToken)}`
-    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
-  const url = `${CLOUD_BASE_URL}/providers/openai/oauth/start?${query}`;
-  void window.notebookDesktop.openExternal(url);
+export async function openOpenAIOAuth(): Promise<void> {
+  const payload = await startOAuthFlow('/providers/openai/oauth/start');
+  await openExternalUrl(payload.url);
 }
 
 export async function disconnectProvider(provider: ProviderId): Promise<void> {
-  const sessionToken = getDesktopSessionToken();
-  const query = sessionToken
-    ? `session_token=${encodeURIComponent(sessionToken)}`
-    : `user_id=${encodeURIComponent(CLOUD_USER_ID)}`;
-  const res = await fetch(
-    `${CLOUD_BASE_URL}/providers/${encodeURIComponent(provider)}?${query}`,
-    { method: 'DELETE' },
+  await cloudFetch(
+    `/providers/${encodeURIComponent(provider)}`,
+    {
+      method: 'DELETE',
+      headers: await authorizedCloudHeaders('none'),
+    },
+    'Unable to disconnect provider.',
   );
-
-  if (!res.ok) {
-    let msg = 'Unable to disconnect provider.';
-    try {
-      const errBody = (await res.json()) as { detail?: string | string[] };
-      const d = errBody.detail;
-      if (typeof d === 'string') {
-        msg = d;
-      } else if (Array.isArray(d) && d.length > 0) {
-        const first = d[0] as { msg?: string };
-        if (typeof first.msg === 'string') {
-          msg = first.msg;
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-    throw new Error(msg);
-  }
 
   await fetch(`${LOCAL_BASE_URL}/providers/status/cache`, {
     method: 'POST',
@@ -428,7 +516,7 @@ export async function streamTransform(
 ): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/transform/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify({ note_id: noteId, content, transform, tone }),
   });
 
@@ -436,48 +524,16 @@ export async function streamTransform(
     throw new Error('Unable to stream AI output.');
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n\n');
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      const eventLine = line
-        .split('\n')
-        .find((chunk) => chunk.startsWith('data:'));
-      if (!eventLine) continue;
-
-      const payload = JSON.parse(eventLine.replace(/^data:\s*/, '')) as {
-        event: 'token' | 'complete' | 'error';
-        data: string;
-      };
-
-      if (payload.event === 'token') {
-        onToken(payload.data);
-      }
-
-      if (payload.event === 'error') {
-        throw new Error(payload.data);
-      }
-    }
-  }
+  await consumeSseStream(res, onToken);
 }
 
 export async function streamInterviewAssist(
   payload: InterviewAssistRequest,
   onToken: (chunk: string) => void,
 ): Promise<void> {
-  // Deprecated compatibility path. Prefer fetchInterviewTurns + streamInterviewCoach.
   const res = await fetch(`${LOCAL_BASE_URL}/ai/interview/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify(payload),
   });
 
@@ -485,38 +541,7 @@ export async function streamInterviewAssist(
     throw new Error('Unable to stream interview guidance.');
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n\n');
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      const eventLine = line
-        .split('\n')
-        .find((chunk) => chunk.startsWith('data:'));
-      if (!eventLine) continue;
-
-      const payloadEvent = JSON.parse(eventLine.replace(/^data:\s*/, '')) as {
-        event: 'token' | 'complete' | 'error';
-        data: string;
-      };
-
-      if (payloadEvent.event === 'token') {
-        onToken(payloadEvent.data);
-      }
-
-      if (payloadEvent.event === 'error') {
-        throw new Error(payloadEvent.data);
-      }
-    }
-  }
+  await consumeSseStream(res, onToken);
 }
 
 export async function fetchInterviewTurns(
@@ -524,7 +549,7 @@ export async function fetchInterviewTurns(
 ): Promise<InterviewTurnsResponse> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/interview/turns`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify(payload),
   });
 
@@ -541,7 +566,7 @@ export async function streamInterviewCoach(
 ): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/interview/coach/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await localAuthHeaders('json'),
     body: JSON.stringify(payload),
   });
 
@@ -549,38 +574,7 @@ export async function streamInterviewCoach(
     throw new Error('Unable to stream interview coach response.');
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n\n');
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      const eventLine = line
-        .split('\n')
-        .find((chunk) => chunk.startsWith('data:'));
-      if (!eventLine) continue;
-
-      const payloadEvent = JSON.parse(eventLine.replace(/^data:\s*/, '')) as {
-        event: 'token' | 'complete' | 'error';
-        data: string;
-      };
-
-      if (payloadEvent.event === 'token') {
-        onToken(payloadEvent.data);
-      }
-
-      if (payloadEvent.event === 'error') {
-        throw new Error(payloadEvent.data);
-      }
-    }
-  }
+  await consumeSseStream(res, onToken);
 }
 
 export type TranscriptionEngine = 'whisper' | 'llm';
@@ -611,8 +605,10 @@ export async function transcribeAudioChunk(
     formData.append('segment_id', String(segmentId));
   }
 
+  const accessToken = await getDesktopAccessToken();
   const res = await fetch(`${LOCAL_BASE_URL}/transcription/chunk`, {
     method: 'POST',
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
     body: formData,
   });
 
@@ -636,4 +632,43 @@ export async function transcribeAudioChunk(
   }
 
   return (await res.json()) as TranscriptionChunkResponse;
+}
+
+async function consumeSseStream(res: Response, onToken: (chunk: string) => void): Promise<void> {
+  const reader = res.body?.getReader();
+  if (!reader) {
+    throw new Error('Streaming response body is unavailable.');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const eventLine = line
+        .split('\n')
+        .find((chunk) => chunk.startsWith('data:'));
+      if (!eventLine) continue;
+
+      const payloadEvent = JSON.parse(eventLine.replace(/^data:\s*/, '')) as {
+        event: 'token' | 'complete' | 'error';
+        data: string;
+      };
+
+      if (payloadEvent.event === 'token') {
+        onToken(payloadEvent.data);
+      }
+
+      if (payloadEvent.event === 'error') {
+        throw new Error(payloadEvent.data);
+      }
+    }
+  }
 }

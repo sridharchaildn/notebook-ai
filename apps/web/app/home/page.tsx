@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UIButton, UICard, UIPill } from '@notebook-ai/ui';
-import { createDesktopSignInLink } from '../../lib/cloud';
+import { errorMessage, getCurrentSupabaseUser } from '../../lib/cloud';
 import { getSupabaseClient, isSupabaseConfigured } from '../../lib/supabase';
 import { AppLogo } from '../components/AppLogo';
 import { ThemeToggle } from '../components/ThemeToggle';
@@ -22,21 +22,9 @@ export default function HomePage() {
     let active = true;
     void (async () => {
       try {
-        let resolvedUserId = localStorage.getItem('notebook_web_user_id') || '';
-        let resolvedEmail = localStorage.getItem('notebook_web_user_email') || '';
-
-        if (isSupabaseConfigured()) {
-          const supabase = getSupabaseClient();
-          const { data } = await supabase.auth.getUser();
-          if (data.user) {
-            resolvedUserId = data.user.id;
-            resolvedEmail = data.user.email ?? resolvedEmail;
-            localStorage.setItem('notebook_web_user_id', resolvedUserId);
-            if (resolvedEmail) {
-              localStorage.setItem('notebook_web_user_email', resolvedEmail);
-            }
-          }
-        }
+        const currentUser = await getCurrentSupabaseUser();
+        const resolvedUserId = currentUser.id;
+        const resolvedEmail = currentUser.email ?? '';
 
         if (!resolvedUserId) {
           router.replace('/auth/signin');
@@ -61,29 +49,26 @@ export default function HomePage() {
     try {
       if (isSupabaseConfigured()) {
         const supabase = getSupabaseClient();
-        const { error } = await supabase.auth.signOut();
+        const { error } = await supabase.auth.signOut({ scope: 'local' });
         if (error) throw error;
       }
     } finally {
-      localStorage.removeItem('notebook_web_user_id');
-      localStorage.removeItem('notebook_web_user_email');
       router.replace('/auth/signin');
     }
   }
 
   async function handleOpenDesktopApp() {
-    if (!userId || openingDesktop) return;
+    if (openingDesktop) return;
     setOpeningDesktop(true);
     setDesktopStatus('');
     try {
-      const deepLink = await createDesktopSignInLink(userId);
-      setDesktopStatus('Opening desktop app and completing sign in...');
-      window.location.href = deepLink;
+      setDesktopStatus('Opening desktop app...');
+      window.location.href = 'notebook-ai://open';
       window.setTimeout(() => {
-        setDesktopStatus('If desktop did not finish sign in, click Open Desktop App again.');
+        setDesktopStatus('If Notebook AI did not open, launch it manually from Applications.');
       }, 2200);
     } catch (error) {
-      setDesktopStatus(error instanceof Error ? error.message : 'Unable to open desktop app.');
+      setDesktopStatus(errorMessage(error, 'Unable to open desktop app.'));
     } finally {
       setOpeningDesktop(false);
     }
@@ -179,7 +164,10 @@ export default function HomePage() {
                 </Link>
               </div>
               {desktopStatus ? (
-                <p className={`save-feedback ${desktopStatus.toLowerCase().includes('unable') ? 'error' : 'success'}`} style={{ marginTop: 10 }}>
+                <p
+                  className={`save-feedback ${/(unable|error|invalid|expired|incomplete|mismatch)/i.test(desktopStatus) ? 'error' : 'success'}`}
+                  style={{ marginTop: 10 }}
+                >
                   {desktopStatus}
                 </p>
               ) : (

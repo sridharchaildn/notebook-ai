@@ -9,12 +9,14 @@ def test_notes_crud_and_provider_status(tmp_path):
     settings = Settings(
         notes_dir=tmp_path / "notes",
         profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
     )
     client = TestClient(create_app(settings))
 
     created = client.post(
         "/notes",
-        json={"title": "Design Ideas", "body": "Ship desktop MVP", "tags": ["design"]},
+        json={"title": "Design Ideas", "content": "Ship desktop MVP", "tags": ["design"]},
     )
     assert created.status_code == 201
     note_id = created.json()["frontmatter"]["id"]
@@ -25,7 +27,7 @@ def test_notes_crud_and_provider_status(tmp_path):
 
     updated = client.put(
         f"/notes/{note_id}",
-        json={"title": "Design Ideas v2", "body": "Ship quickly", "tags": ["mvp"]},
+        json={"title": "Design Ideas v2", "content": "Ship quickly", "tags": ["mvp"]},
     )
     assert updated.status_code == 200
     assert updated.json()["frontmatter"]["title"] == "Design Ideas v2"
@@ -39,10 +41,39 @@ def test_notes_crud_and_provider_status(tmp_path):
     assert openai_status["connected"] is True
 
 
+def test_notes_accept_legacy_body_payloads(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
+    )
+    client = TestClient(create_app(settings))
+
+    created = client.post(
+        "/notes",
+        json={"title": "Legacy Body Note", "body": "Saved via body", "tags": ["legacy"]},
+    )
+    assert created.status_code == 201
+    payload = created.json()
+    assert payload["content"] == "Saved via body"
+    assert payload["content_format"] == "plain_text"
+    note_id = payload["frontmatter"]["id"]
+
+    updated = client.put(
+        f"/notes/{note_id}",
+        json={"title": "Legacy Body Note v2", "body": "Updated via body", "tags": ["legacy"]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["content"] == "Updated via body"
+
+
 def test_stream_transform_sse(tmp_path):
     settings = Settings(
         notes_dir=tmp_path / "notes",
         profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
     )
     client = TestClient(create_app(settings))
 
@@ -65,6 +96,8 @@ def test_interview_turns_and_coach_stream(tmp_path):
     settings = Settings(
         notes_dir=tmp_path / "notes",
         profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
     )
     client = TestClient(create_app(settings))
 
@@ -104,6 +137,8 @@ def test_transcription_chunk_returns_structured_error_fields(tmp_path):
         profile_path=tmp_path / "provider_status.json",
         openai_api_key=None,
         cloud_api_url="http://127.0.0.1:9",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
     )
     client = TestClient(create_app(settings))
 
@@ -147,7 +182,7 @@ def test_storage_and_folder_endpoints(tmp_path):
     assert folder.status_code == 201
     folder_id = folder.json()["id"]
 
-    note = client.post("/notes", json={"title": "N1", "body": "Hello", "tags": []})
+    note = client.post("/notes", json={"title": "N1", "content": "Hello", "tags": []})
     assert note.status_code == 201
     note_id = note.json()["frontmatter"]["id"]
 

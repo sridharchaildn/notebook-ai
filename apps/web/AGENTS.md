@@ -1,5 +1,7 @@
 # Notebook AI Web — UI/UX Standards
 
+This file covers web UI/UX rules only. Repo-wide architecture and ownership rules live in the root [`AGENTS.md`](/Users/sridhar2901/git-personal/notebook-ai/AGENTS.md) and apply here first.
+
 This document defines the UI/UX standards for the Notebook AI web app (Next.js). All pages, components, and future features must follow these conventions to maintain visual consistency with the desktop app.
 
 ---

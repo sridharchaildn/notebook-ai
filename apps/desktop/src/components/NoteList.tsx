@@ -1,5 +1,6 @@
+import { getNoteSnippet } from '@notebook-ai/app-core';
 import type { NoteDocument } from '@notebook-ai/contracts';
-import { BookOpen, HelpCircle, PanelLeftClose, Search, Settings, SquarePen } from 'lucide-react';
+import { BookOpen, HelpCircle, LogOut, PanelLeftClose, Search, Settings, SquarePen } from 'lucide-react';
 
 interface Props {
   notes: NoteDocument[];
@@ -11,6 +12,8 @@ interface Props {
   onOpenSettings: () => void;
   onOpenSplash: () => void;
   onCollapse: () => void;
+  onLogout: () => void;
+  logoutBusy: boolean;
 }
 
 export function NoteList({
@@ -23,6 +26,8 @@ export function NoteList({
   onOpenSettings,
   onOpenSplash,
   onCollapse,
+  onLogout,
+  logoutBusy,
 }: Props) {
   return (
     <aside className="note-list">
@@ -73,7 +78,7 @@ export function NoteList({
                 <span className="note-row__meta">
                   {new Date(note.frontmatter.updated_at).toLocaleString()}
                 </span>
-                <p className="note-row__snippet">{note.body.slice(0, 92) || 'Start writing...'}</p>
+                <p className="note-row__snippet">{getNoteSnippet(note) || 'Start writing...'}</p>
                 {note.frontmatter.tags.length > 0 && (
                   <div className="note-row__tags">
                     {note.frontmatter.tags.slice(0, 3).map((tag) => (
@@ -91,6 +96,10 @@ export function NoteList({
         <button type="button" className="footer-btn" onClick={onOpenSettings}>
           <Settings size={16} />
           Settings
+        </button>
+        <button type="button" className="footer-btn" onClick={onLogout} disabled={logoutBusy}>
+          <LogOut size={16} />
+          {logoutBusy ? 'Signing out...' : 'Sign out'}
         </button>
         <button type="button" className="footer-btn" onClick={() => window.open('http://127.0.0.1:3000', '_blank')}>
           <HelpCircle size={16} />

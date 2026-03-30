@@ -44,11 +44,15 @@ class AIService:
             else None
         )
 
-    async def stream_transform(self, payload: AITransformRequest) -> AsyncIterator[str]:
+    async def stream_transform(
+        self,
+        payload: AITransformRequest,
+        access_token: str | None = None,
+    ) -> AsyncIterator[str]:
         provider = payload.provider or self.settings.default_provider
         system_prompt, user_prompt = _build_prompts(payload)
 
-        adapter = await self._resolve_adapter(provider)
+        adapter = await self._resolve_adapter(provider, access_token)
         if adapter is None:
             async for token in _stream_local_fallback(payload):
                 yield token
@@ -64,6 +68,7 @@ class AIService:
     async def extract_interview_turns(
         self,
         payload: InterviewTurnsRequest,
+        access_token: str | None = None,
     ) -> InterviewTurnsResponse:
         transcript = payload.transcript.strip()
         digest = _transcript_digest(transcript)
@@ -75,7 +80,7 @@ class AIService:
             )
 
         provider = payload.provider or self.settings.default_provider
-        adapter = await self._resolve_adapter(provider)
+        adapter = await self._resolve_adapter(provider, access_token)
 
         if adapter is None:
             parsed_turns = _heuristic_turns_from_transcript(transcript)
@@ -104,9 +109,10 @@ class AIService:
     async def stream_interview_coach(
         self,
         payload: InterviewCoachRequest,
+        access_token: str | None = None,
     ) -> AsyncIterator[str]:
         provider = payload.provider or self.settings.default_provider
-        adapter = await self._resolve_adapter(provider)
+        adapter = await self._resolve_adapter(provider, access_token)
 
         if adapter is None:
             async for token in _stream_local_coach_fallback(payload):
@@ -121,7 +127,11 @@ class AIService:
         ):
             yield token
 
-    async def stream_interview_assist(self, payload: InterviewAssistRequest) -> AsyncIterator[str]:
+    async def stream_interview_assist(
+        self,
+        payload: InterviewAssistRequest,
+        access_token: str | None = None,
+    ) -> AsyncIterator[str]:
         """
         Deprecated compatibility path; new clients should use:
         1) POST /ai/interview/turns
@@ -133,7 +143,7 @@ class AIService:
             provider=payload.provider,
             model=payload.model,
         )
-        turns_response = await self.extract_interview_turns(turns_payload)
+        turns_response = await self.extract_interview_turns(turns_payload, access_token=access_token)
         interviewer_turn = _latest_turn(turns_response.turns, "interviewer")
         if interviewer_turn is None:
             yield "Listening for the next interviewer question."
@@ -147,31 +157,32 @@ class AIService:
             provider=payload.provider,
             model=payload.model,
         )
-        async for token in self.stream_interview_coach(coach_payload):
+        async for token in self.stream_interview_coach(coach_payload, access_token=access_token):
             yield token
 
-    async def _resolve_adapter(self, provider: str):
+    async def _resolve_adapter(self, provider: str, access_token: str | None = None):
         if provider == "openrouter" and self._openrouter:
             return self._openrouter
         if provider == "openai" and self._openai:
             return self._openai
 
-        if provider in self._adapter_cache:
-            return self._adapter_cache[provider]
+        cache_key = f"{provider}:{hash(access_token or '')}"
+        if cache_key in self._adapter_cache:
+            return self._adapter_cache[cache_key]
 
-        resolved = await self._load_adapter_from_cloud(provider)
-        self._adapter_cache[provider] = resolved
+        resolved = await self._load_adapter_from_cloud(provider, access_token)
+        self._adapter_cache[cache_key] = resolved
         return resolved
 
-    async def _load_adapter_from_cloud(self, provider: str):
+    async def _load_adapter_from_cloud(self, provider: str, access_token: str | None = None):
+        if not access_token:
+            return None
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 response = await client.get(
                     f"{self.settings.cloud_api_url}/providers/credential",
-                    params={
-                        "provider": provider,
-                        "user_id": self.settings.cloud_user_id,
-                    },
+                    params={"provider": provider},
+                    headers={"Authorization": f"Bearer {access_token}"},
                 )
         except httpx.HTTPError:
             return None

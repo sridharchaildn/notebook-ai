@@ -2,23 +2,49 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-from app.config import Settings
-from app.main import create_app
-from app.security import decrypt_secret
-from app.storage import CredentialVault
 from fastapi.testclient import TestClient
 
+from app.config import Settings
+from app.main import create_app
+from app.models import AuthenticatedUser, SupabaseSessionPayload
+from app.security import MemoryAuthGateway, decrypt_secret
+from app.storage import MemoryStore
 
-def test_byok_store_status_and_delete(tmp_path):
+
+def _build_test_app() -> tuple[TestClient, MemoryStore, MemoryAuthGateway, SupabaseSessionPayload]:
     settings = Settings(
-        database_path=tmp_path / "cloud.db",
         credential_secret="vault-secret",
+        openai_oauth_client_id="client-test",
     )
-    client = TestClient(create_app(settings))
+    store = MemoryStore()
+    user = AuthenticatedUser(id="user-a", email="user@example.com")
+    session = SupabaseSessionPayload(
+        access_token="access-user-a",
+        refresh_token="refresh-user-a",
+        expires_at=1_800_000_000,
+        expires_in=3600,
+        token_type="bearer",
+        user=user,
+    )
+    auth = MemoryAuthGateway(
+        users_by_access_token={session.access_token: user},
+        sessions_by_refresh_token={session.refresh_token: session},
+    )
+    client = TestClient(create_app(settings, store=store, auth_gateway=auth))
+    return client, store, auth, session
+
+
+def _auth_headers(session: SupabaseSessionPayload) -> dict[str, str]:
+    return {"Authorization": f"Bearer {session.access_token}"}
+
+
+def test_byok_store_status_and_delete():
+    client, _store, _auth, session = _build_test_app()
 
     saved = client.post(
         "/providers/byok",
-        json={"provider": "openai", "api_key": "sk-test-123", "user_id": "user-a"},
+        headers=_auth_headers(session),
+        json={"provider": "openai", "api_key": "sk-test-123"},
     )
     assert saved.status_code == 200
     statuses = saved.json()
@@ -26,37 +52,32 @@ def test_byok_store_status_and_delete(tmp_path):
     assert openai["connected"] is True
     assert openai["via"] == "api_key"
 
-    listed = client.get("/providers/status", params={"user_id": "user-a"})
+    listed = client.get("/providers/status", headers=_auth_headers(session))
     assert listed.status_code == 200
     assert any(item["provider"] == "openai" and item["connected"] for item in listed.json())
 
     credential = client.get(
         "/providers/credential",
-        params={"provider": "openai", "user_id": "user-a"},
+        headers=_auth_headers(session),
+        params={"provider": "openai"},
     )
     assert credential.status_code == 200
     assert credential.json()["secret"] == "sk-test-123"
 
-    deleted = client.delete("/providers/openai", params={"user_id": "user-a"})
+    deleted = client.delete("/providers/openai", headers=_auth_headers(session))
     assert deleted.status_code == 200
     assert deleted.json()["connected"] is False
 
 
-def test_oauth_start_and_callback_flow(tmp_path):
-    settings = Settings(
-        database_path=tmp_path / "cloud.db",
-        credential_secret="vault-secret",
-        openai_oauth_client_id="client-test",
-    )
-    client = TestClient(create_app(settings))
+def test_oauth_start_and_callback_flow():
+    client, store, _auth, session = _build_test_app()
 
-    redirect = client.get(
+    redirect = client.post(
         "/providers/openai/oauth/start",
-        params={"user_id": "oauth-user"},
-        follow_redirects=False,
+        headers=_auth_headers(session),
     )
-    assert redirect.status_code in {302, 307}
-    location = redirect.headers["location"]
+    assert redirect.status_code == 200
+    location = redirect.json()["url"]
 
     parsed = urlparse(location)
     query = parse_qs(parsed.query)
@@ -69,131 +90,33 @@ def test_oauth_start_and_callback_flow(tmp_path):
     assert callback.status_code == 200
     assert "OpenAI Connected" in callback.text
 
-    vault = CredentialVault(settings.database_path)
-    record = vault.get_credential("oauth-user", "openai")
+    record = store.credentials.get(("user-a", "openai"))
     assert record is not None
     assert record.connection_type == "oauth"
-    decrypted = decrypt_secret(record.encrypted_value, settings.credential_secret)
+    decrypted = decrypt_secret(record.encrypted_value, "vault-secret")
     assert "code-abc" in decrypted
 
 
-def test_auth_session_exchange_dev_fallback(tmp_path):
-    settings = Settings(
-        database_path=tmp_path / "cloud.db",
-        app_jwt_secret="dev-secret",
-        dev_user_id="dev-user",
+def test_auth_refresh_and_logout():
+    client, _store, _auth, session = _build_test_app()
+
+    refreshed = client.post(
+        "/auth/session/refresh",
+        json={"refresh_token": session.refresh_token},
     )
-    client = TestClient(create_app(settings))
+    assert refreshed.status_code == 200
+    assert refreshed.json()["session"]["access_token"] == session.access_token
 
-    response = client.post("/auth/session/exchange", json={})
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["user_id"] == "dev-user"
-    assert isinstance(payload["session_token"], str) and payload["session_token"]
+    logout = client.post("/auth/logout", headers=_auth_headers(session))
+    assert logout.status_code == 200
+    assert logout.json()["ok"] is True
 
-
-def test_desktop_auth_exchange_round_trip(tmp_path):
-    settings = Settings(
-        database_path=tmp_path / "cloud.db",
-        app_jwt_secret="desktop-secret",
-        web_app_url="http://127.0.0.1:3000",
-        desktop_auth_path="/desktop/auth",
-        desktop_callback_scheme="notebook-ai://auth/callback",
-    )
-    client = TestClient(create_app(settings))
-
-    init_res = client.post("/auth/desktop/exchange/init", json={"device_label": "MacBook"})
-    assert init_res.status_code == 200
-    state = init_res.json()["state"]
-    assert state
-    assert "http://127.0.0.1:3000/desktop/auth" in init_res.json()["auth_url"]
-
-    docs_res = client.get("/legal/current")
-    assert docs_res.status_code == 200
-    docs = docs_res.json()["documents"]
-    accept_res = client.post(
-        "/legal/accept",
-        json={
-            "user_id": "desktop-user",
-            "acceptances": [
-                {"type": "privacy_policy", "version": docs[0]["version"]},
-                {"type": "user_agreement", "version": docs[1]["version"]},
-            ],
-        },
-    )
-    assert accept_res.status_code == 200
-
-    complete_web_res = client.post(
-        "/auth/desktop/exchange/complete",
-        json={"state": state, "user_id": "desktop-user"},
-    )
-    assert complete_web_res.status_code == 200
-    code = complete_web_res.json()["code"]
-    assert code
-    assert complete_web_res.json()["deep_link_url"].startswith("notebook-ai://auth/callback?code=")
-
-    complete_desktop_res = client.post(
-        "/auth/desktop/exchange/complete",
-        json={"code": code},
-    )
-    assert complete_desktop_res.status_code == 200
-    assert complete_desktop_res.json()["user_id"] == "desktop-user"
-    assert complete_desktop_res.json()["onboarding_complete"] is True
-    assert isinstance(complete_desktop_res.json()["session_token"], str)
+    after = client.get("/providers/status", headers=_auth_headers(session))
+    assert after.status_code == 401
 
 
-def test_desktop_auth_exchange_poll_round_trip(tmp_path):
-    settings = Settings(
-        database_path=tmp_path / "cloud.db",
-        app_jwt_secret="desktop-secret",
-        web_app_url="http://127.0.0.1:3000",
-        desktop_auth_path="/desktop/auth",
-        desktop_callback_scheme="notebook-ai://auth/callback",
-    )
-    client = TestClient(create_app(settings))
-
-    init_res = client.post("/auth/desktop/exchange/init", json={"device_label": "MacBook"})
-    assert init_res.status_code == 200
-    state = init_res.json()["state"]
-
-    docs_res = client.get("/legal/current")
-    docs = docs_res.json()["documents"]
-    accept_res = client.post(
-        "/legal/accept",
-        json={
-            "user_id": "desktop-user",
-            "acceptances": [
-                {"type": "privacy_policy", "version": docs[0]["version"]},
-                {"type": "user_agreement", "version": docs[1]["version"]},
-            ],
-        },
-    )
-    assert accept_res.status_code == 200
-
-    pre_poll = client.get("/auth/desktop/exchange/poll", params={"state": state})
-    assert pre_poll.status_code == 200
-    assert pre_poll.json()["ready"] is False
-
-    complete_web_res = client.post(
-        "/auth/desktop/exchange/complete",
-        json={"state": state, "user_id": "desktop-user"},
-    )
-    assert complete_web_res.status_code == 200
-
-    poll_res = client.get("/auth/desktop/exchange/poll", params={"state": state})
-    assert poll_res.status_code == 200
-    assert poll_res.json()["ready"] is True
-    assert poll_res.json()["user_id"] == "desktop-user"
-    assert isinstance(poll_res.json()["session_token"], str)
-
-
-def test_legal_storage_and_drive_status(tmp_path):
-    settings = Settings(
-        database_path=tmp_path / "cloud.db",
-        credential_secret="vault-secret",
-        app_jwt_secret="legal-secret",
-    )
-    client = TestClient(create_app(settings))
+def test_legal_storage_and_drive_status():
+    client, _store, _auth, session = _build_test_app()
 
     legal_current = client.get("/legal/current")
     assert legal_current.status_code == 200
@@ -202,8 +125,8 @@ def test_legal_storage_and_drive_status(tmp_path):
 
     accepted = client.post(
         "/legal/accept",
+        headers=_auth_headers(session),
         json={
-            "user_id": "user-a",
             "acceptances": [
                 {"type": "privacy_policy", "version": docs[0]["version"]},
                 {"type": "user_agreement", "version": docs[1]["version"]},
@@ -215,18 +138,40 @@ def test_legal_storage_and_drive_status(tmp_path):
 
     pref = client.put(
         "/settings/storage",
-        json={"user_id": "user-a", "mode": "local_and_drive", "local_root": "/tmp/notebook"},
+        headers=_auth_headers(session),
+        json={"mode": "local_and_drive", "local_root": "/tmp/notebook"},
     )
     assert pref.status_code == 200
     assert pref.json()["mode"] == "local_and_drive"
 
     drive = client.post(
         "/integrations/google-drive/byok",
-        json={"user_id": "user-a", "refresh_token": "refresh-123", "folder_id": "folder-1"},
+        headers=_auth_headers(session),
+        json={"refresh_token": "refresh-123", "folder_id": "folder-1"},
     )
     assert drive.status_code == 200
     assert drive.json()["connected"] is True
 
-    drive_status = client.get("/integrations/google-drive/status", params={"user_id": "user-a"})
+    drive_status = client.get("/integrations/google-drive/status", headers=_auth_headers(session))
     assert drive_status.status_code == 200
     assert drive_status.json()["connected"] is True
+
+    updated_folder = client.put(
+        "/integrations/google-drive/folder",
+        headers=_auth_headers(session),
+        json={"folder_id": "folder-2", "folder_name": "Notebook Mirror"},
+    )
+    assert updated_folder.status_code == 200
+    assert updated_folder.json()["folder_id"] == "folder-2"
+    assert updated_folder.json()["folder_name"] == "Notebook Mirror"
+
+    drive_token = client.post("/integrations/google-drive/access-token", headers=_auth_headers(session))
+    assert drive_token.status_code == 200
+    assert drive_token.json()["folder_id"] == "folder-2"
+    assert drive_token.json()["folder_name"] == "Notebook Mirror"
+
+    workspace = client.get("/workspaces/current", headers=_auth_headers(session))
+    assert workspace.status_code == 200
+    assert workspace.json()["kind"] == "drive_shared"
+    assert workspace.json()["storage_mode"] == "local_and_drive"
+    assert workspace.json()["drive_folder_id"] == "folder-2"

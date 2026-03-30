@@ -9,7 +9,9 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
+    "@notebook-ai/app-core": "0.1.0",
     "@notebook-ai/contracts": "0.1.0",
+    "@notebook-ai/server-ai": "0.1.0",
     "@notebook-ai/theme": "0.1.0",
     "@notebook-ai/ui": "0.1.0",
     "@supabase/supabase-js": "^2.58.0",

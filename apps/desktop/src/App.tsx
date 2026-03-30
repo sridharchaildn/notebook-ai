@@ -1,38 +1,59 @@
+import {
+  getInterviewSession,
+  getTranscriptSession,
+  isMarkdownNote,
+  isTranscriptNote,
+} from '@notebook-ai/app-core';
 import type {
+  ContentFormat,
   DriveConnectionStatus,
+  InterviewSessionData,
   InterviewTurn,
+  LegalDocument,
+  NoteKind,
   NoteDocument,
   ProviderId,
+  SupabaseSessionPayload,
   StoragePreference,
   SyncStatus,
+  TranscriptSessionData,
 } from '@notebook-ai/contracts';
 import { ChevronRight, PanelLeftClose, PanelRightClose, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { AIActionPanel } from './components/AIActionPanel';
+import { LegalAcceptanceGate } from './components/LegalAcceptanceGate';
+import { MarkdownPreview } from './components/MarkdownPreview';
 import { NoteList } from './components/NoteList';
 import { SettingsModal } from './components/SettingsModal';
 import { SplashScreen } from './components/SplashScreen';
+import { SyncStatusBanner } from './components/SyncStatusBanner';
+import { TranscriptSessionView } from './components/TranscriptSessionView';
 import {
   TranscriptionPanel,
   type CaptureMode,
   type CaptureSessionMode,
 } from './components/TranscriptionPanel';
 import {
+  acceptLegalDocuments,
+  authInvalidEventName,
   createNote,
-  completeDesktopAuth,
+  getRendererSessionFallback,
   disconnectProvider,
+  type DesktopRendererSession,
   fetchInterviewTurns,
+  fetchLegalAcceptances,
+  fetchLegalDocuments,
   fetchLocalRoot,
   fetchNotes,
   fetchGoogleDriveStatus,
   fetchProviderStatus,
   fetchStoragePreference,
   fetchSyncStatus,
+  logoutCloudSession,
   openOpenAIOAuth,
-  pollDesktopAuthState,
   runSyncNow,
+  setRendererSessionFallback,
   setLocalRoot,
-  startDesktopAuthFlow,
   storeByok,
   openGoogleDriveConnect,
   streamInterviewCoach,
@@ -42,8 +63,15 @@ import {
   updateNote,
   type TranscriptionEngine,
 } from './lib/api';
+import { describeSyncStatus } from './lib/syncStatus';
+import {
+  completeDesktopAuthCallback,
+  hasPendingDesktopAuthFlow,
+  sendDesktopMagicLink,
+  startDesktopGoogleSignIn,
+} from './lib/supabaseAuth';
 
-const DEFAULT_BODY = '# New note\n\nStart typing...';
+const DEFAULT_BODY = 'Start typing...';
 const INTERVIEW_SEGMENT_MS = 8000;
 const INTERVIEW_RECOVERABLE_FAILURE_LIMIT = 2;
 const INTERVIEW_TRANSCRIPT_TAIL_CHARS = 5000;
@@ -65,6 +93,7 @@ const INTERVIEW_FILLER_UTTERANCES = new Set([
   'thanks',
   'thank you',
 ]);
+const MAIN_AUTH_SESSION_EVENT = 'notebook:main-auth-session';
 
 function useDebouncedEffect(effect: () => void, deps: unknown[], delay: number) {
   const cleanupRef = useRef<void | (() => void)>();
@@ -87,6 +116,9 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState(DEFAULT_BODY);
+  const [noteKind, setNoteKind] = useState<NoteKind>('note');
+  const [contentFormat, setContentFormat] = useState<ContentFormat>('plain_text');
+  const [showMarkdownSource, setShowMarkdownSource] = useState(false);
   const [tags, setTags] = useState('');
   const [search, setSearch] = useState('');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -105,16 +137,14 @@ export default function App() {
   const [byokProvider, setByokProvider] = useState<'openai' | 'openrouter'>('openai');
   const [byokValue, setByokValue] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sessionUserId, setSessionUserId] = useState<string | null>(
-    () => localStorage.getItem('notebook_session_user_id') ?? null,
-  );
-  const [pendingDesktopAuthState, setPendingDesktopAuthState] = useState<string | null>(
-    () => localStorage.getItem('notebook_pending_desktop_auth_state') ?? null,
-  );
-  const [showSplash, setShowSplash] = useState(() => !localStorage.getItem('notebook_session_user_id'));
+  const [authReady, setAuthReady] = useState(false);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+  const [authPending, setAuthPending] = useState(false);
+  const [showSplash, setShowSplash] = useState(true);
   const [manualSignInUrl, setManualSignInUrl] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const [magicLinkEmail, setMagicLinkEmail] = useState('');
   const [storagePreference, setStoragePreference] = useState<StoragePreference>({
     mode: 'local',
     local_root: null,
@@ -122,6 +152,7 @@ export default function App() {
   const [localRootPath, setLocalRootPath] = useState('');
   const [storageBusy, setStorageBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [syncActionBusy, setSyncActionBusy] = useState(false);
   const [driveStatus, setDriveStatus] = useState<DriveConnectionStatus>(DEFAULT_DRIVE_STATUS);
   const [driveStatusBusy, setDriveStatusBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -142,6 +173,13 @@ export default function App() {
   const [interviewGuidance, setInterviewGuidance] = useState('');
   const [interviewGuidanceBusy, setInterviewGuidanceBusy] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [legalStage, setLegalStage] = useState<'checking' | 'needs_acceptance' | 'ready' | 'error'>('checking');
+  const [legalDocuments, setLegalDocuments] = useState<LegalDocument[]>([]);
+  const [legalBusy, setLegalBusy] = useState(false);
+  const [legalError, setLegalError] = useState('');
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [legalReloadToken, setLegalReloadToken] = useState(0);
   const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>(() => {
     return (localStorage.getItem('notebook_transcription_engine') as TranscriptionEngine) || 'whisper';
   });
@@ -179,7 +217,19 @@ export default function App() {
   const interviewThreadRef = useRef<HTMLDivElement | null>(null);
   const interviewBottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollInterviewRef = useRef(true);
-  const authPollErrorShownRef = useRef(false);
+  const authCallbackInFlightRef = useRef<string | null>(null);
+  const lastHandledAuthCallbackRef = useRef<string | null>(null);
+  const driveConnectPollingRef = useRef(false);
+
+  function applyRendererSession(session: DesktopRendererSession | null) {
+    setRendererSessionFallback(session);
+    setAuthPending(false);
+    setManualSignInUrl(null);
+    setSessionUserId(session?.userId ?? null);
+    setShowSplash(!session?.userId);
+    setLegalReloadToken((value) => value + 1);
+    setMessage(session?.userId ? 'Signed in. Checking legal requirements...' : 'Ready');
+  }
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -207,6 +257,7 @@ export default function App() {
   useEffect(() => {
     const sentinel = interviewBottomSentinelRef.current;
     if (!sentinel) return;
+    if (noteKind !== 'interview_assist') return;
     if (!shouldAutoScrollInterviewRef.current) return;
 
     const frame = window.requestAnimationFrame(() => {
@@ -214,10 +265,10 @@ export default function App() {
       setShowJumpToLatest(false);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [interviewTurns, activeSessionMode]);
+  }, [interviewTurns, noteKind]);
 
   useEffect(() => {
-    if (activeSessionMode !== 'interview_assist') return;
+    if (noteKind !== 'interview_assist') return;
     const container = interviewThreadRef.current;
     const sentinel = interviewBottomSentinelRef.current;
     if (!container || !sentinel) return;
@@ -237,7 +288,7 @@ export default function App() {
 
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [activeSessionMode, interviewTurns.length]);
+  }, [noteKind, interviewTurns.length]);
 
   useEffect(() => {
     if (activeSessionMode !== 'interview_assist') return;
@@ -256,14 +307,72 @@ export default function App() {
   }, [activeSessionMode]);
 
   useEffect(() => {
-    if (!window.notebookDesktop?.onAuthCallback) {
-      return;
-    }
-
     let disposed = false;
+    void (async () => {
+      try {
+        const [bridgeSession, pendingAuthFlow] = await Promise.all([
+          window.notebookDesktop?.getAuthSession?.(),
+          hasPendingDesktopAuthFlow(),
+        ]);
+        const session = bridgeSession ?? getRendererSessionFallback();
+        if (disposed) return;
+        setSessionUserId(session?.userId ?? null);
+        setAuthPending(Boolean(!session?.userId && pendingAuthFlow));
+        setShowSplash(!session?.userId);
+      } finally {
+        if (!disposed) {
+          setAuthReady(true);
+        }
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const eventName = authInvalidEventName();
+    const handler = (event: Event) => {
+      const detail =
+        event instanceof CustomEvent && typeof event.detail === 'string'
+          ? event.detail
+          : 'Session expired. Sign in again.';
+      setRendererSessionFallback(null);
+      setSessionUserId(null);
+      setAuthPending(false);
+      setManualSignInUrl(null);
+      setSettingsOpen(false);
+      setLegalStage('checking');
+      setLegalDocuments([]);
+      setLegalError('');
+      setShowSplash(true);
+      setMessage(detail);
+    };
+
+    window.addEventListener(eventName, handler);
+    return () => {
+      window.removeEventListener(eventName, handler);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const syncSessionFromMain = async () => {
+      const session = (await window.notebookDesktop?.getAuthSession?.()) ?? getRendererSessionFallback();
+      if (!disposed && session?.userId) {
+        applyRendererSession(session);
+        return true;
+      }
+      return false;
+    };
+
     const tryConsumePending = async () => {
       try {
-        const url = await window.notebookDesktop.consumeAuthCallback?.();
+        if (await syncSessionFromMain()) {
+          return;
+        }
+        const url = await window.notebookDesktop?.consumeAuthCallback?.();
         if (!disposed && url) {
           void handleDesktopAuthCallback(url);
         }
@@ -278,50 +387,77 @@ export default function App() {
       void tryConsumePending();
     }, 1200);
 
-    const unsubscribe = window.notebookDesktop.onAuthCallback((url) => {
+    const unsubscribeAuthCallback = window.notebookDesktop?.onAuthCallback?.((url) => {
       void handleDesktopAuthCallback(url);
     });
+    const unsubscribeSession = window.notebookDesktop?.onAuthSessionUpdated?.((session) => {
+      applyRendererSession(session);
+    });
+    const onMainSession = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail =
+        event.detail && typeof event.detail === 'object'
+          ? (event.detail as DesktopRendererSession | null)
+          : null;
+      applyRendererSession(detail);
+    };
+    window.addEventListener(MAIN_AUTH_SESSION_EVENT, onMainSession);
     return () => {
       disposed = true;
       window.clearInterval(pollTimer);
-      unsubscribe();
+      unsubscribeAuthCallback?.();
+      unsubscribeSession?.();
+      window.removeEventListener(MAIN_AUTH_SESSION_EVENT, onMainSession);
     };
   }, [sessionUserId]);
 
   useEffect(() => {
-    if (!showSplash || sessionUserId || !pendingDesktopAuthState) return;
-    let disposed = false;
+    if (!authReady) return;
+    if (!sessionUserId) {
+      setLegalStage('checking');
+      setLegalDocuments([]);
+      setLegalError('');
+      return;
+    }
 
-    const pollDesktopAuth = async () => {
+    let disposed = false;
+    void (async () => {
       try {
-        const status = await pollDesktopAuthState(pendingDesktopAuthState);
-        if (!status.ready || !status.session_token || !status.user_id) {
+        setLegalStage('checking');
+        setLegalError('');
+        const [documents, acceptances] = await Promise.all([
+          fetchLegalDocuments(),
+          fetchLegalAcceptances(),
+        ]);
+        if (disposed) return;
+
+        const acceptedPairs = new Set(acceptances.map((entry) => `${entry.type}:${entry.version}`));
+        const missing = documents.filter((doc) => !acceptedPairs.has(`${doc.type}:${doc.version}`));
+
+        setLegalDocuments(documents);
+        setPrivacyAccepted(false);
+        setTermsAccepted(false);
+        if (missing.length > 0) {
+          setLegalStage('needs_acceptance');
+          setMessage('Accept the latest Privacy Policy and User Agreement to continue.');
           return;
         }
-        if (disposed) return;
-        applyDesktopSession(status.session_token, status.user_id);
-        setMessage('Signed in. Desktop is ready.');
-      } catch {
-        if (authPollErrorShownRef.current) return;
-        authPollErrorShownRef.current = true;
-        setMessage(
-          'Auth status check failed. Restart desktop + cloud API, then sign in again.',
-        );
-      }
-    };
 
-    void pollDesktopAuth();
-    const timer = window.setInterval(() => {
-      void pollDesktopAuth();
-    }, 1500);
+        setLegalStage('ready');
+      } catch (error) {
+        if (disposed) return;
+        setLegalError(error instanceof Error ? error.message : 'Unable to load legal requirements.');
+        setLegalStage('error');
+      }
+    })();
 
     return () => {
       disposed = true;
-      window.clearInterval(timer);
     };
-  }, [showSplash, sessionUserId, pendingDesktopAuthState]);
+  }, [authReady, sessionUserId, legalReloadToken]);
 
   useEffect(() => {
+    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
     void (async () => {
       try {
         const [loadedNotes, providerStatuses, pref, localRoot, sync, drive] = await Promise.all([
@@ -351,25 +487,58 @@ export default function App() {
         if (first) {
           setSelectedId(first.frontmatter.id);
           setTitle(first.frontmatter.title);
-          setBody(first.body);
+          setBody(first.content);
+          setNoteKind(first.kind);
+          setContentFormat(first.content_format);
           setTags(first.frontmatter.tags.join(', '));
         } else {
           const created = await createNote({
             title: 'Welcome note',
-            body: DEFAULT_BODY,
+            content: DEFAULT_BODY,
             tags: ['welcome'],
+            kind: 'note',
+            content_format: 'plain_text',
           });
           setNotes([created]);
           setSelectedId(created.frontmatter.id);
           setTitle(created.frontmatter.title);
-          setBody(created.body);
+          setBody(created.content);
+          setNoteKind(created.kind);
+          setContentFormat(created.content_format);
           setTags(created.frontmatter.tags.join(', '));
         }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Failed to initialize');
       }
     })();
-  }, []);
+  }, [authReady, sessionUserId, legalStage]);
+
+  useEffect(() => {
+    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
+    if (storagePreference.mode !== 'local_and_drive') return;
+
+    let disposed = false;
+    const poll = async () => {
+      try {
+        const status = await fetchSyncStatus();
+        if (!disposed) {
+          setSyncStatus(status);
+        }
+      } catch {
+        /* ignore transient sync polling failures */
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 2500);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [authReady, sessionUserId, legalStage, storagePreference.mode]);
 
   const selectedNote = useMemo(
     () => notes.find((note) => note.frontmatter.id === selectedId) ?? null,
@@ -383,18 +552,68 @@ export default function App() {
     }
   }
 
-  function buildInterviewNoteBody(transcript: string, guidance: string) {
-    const transcriptSection = transcript.trim() || '_Listening for interview conversation..._';
-    const guidanceSection = guidance.trim() || `_${COACH_PLACEHOLDER}_`;
-    return [
-      '# Interview Assist Session',
-      '',
-      '## Live Transcript',
-      transcriptSection,
-      '',
-      '## Recommended Next Response',
-      guidanceSection,
-    ].join('\n');
+  function buildInterviewSession(
+    transcript: string,
+    guidance: string,
+    turns: InterviewTurn[] = interviewTurnsRef.current,
+  ): InterviewSessionData {
+    return {
+      session_type: 'interview_assist',
+      transcript,
+      guidance,
+      turns,
+      last_coached_interviewer_turn_id: lastCoachedInterviewerTurnIdRef.current,
+      last_updated_at: new Date().toISOString(),
+    };
+  }
+
+  function buildTranscriptSession(transcript: string): TranscriptSessionData {
+    return {
+      session_type: 'transcript',
+      transcript,
+      last_updated_at: new Date().toISOString(),
+    };
+  }
+
+  function serializeExistingSessionForCompare(session: NoteDocument['session'] | null) {
+    if (!session || typeof session !== 'object') {
+      return 'null';
+    }
+    const comparable = { ...((session as unknown) as Record<string, unknown>) };
+    delete comparable.last_updated_at;
+    return JSON.stringify(comparable);
+  }
+
+  function serializeSessionForCompare(kind: NoteKind, content: string): string {
+    if (kind === 'interview_assist') {
+      return serializeExistingSessionForCompare(
+        buildInterviewSession(
+          interviewTranscriptRef.current || content,
+          interviewGuidanceRef.current,
+          interviewTurnsRef.current,
+        ),
+      );
+    }
+
+    if (kind === 'transcript') {
+      return serializeExistingSessionForCompare(buildTranscriptSession(content));
+    }
+
+    return 'null';
+  }
+
+  function buildTransformContent(currentNote: NoteDocument | null, currentContent: string) {
+    if (!currentNote) return currentContent;
+    if (currentNote.kind === 'interview_assist') {
+      return [
+        interviewTranscriptRef.current || currentContent,
+        interviewGuidanceRef.current,
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+        .trim();
+    }
+    return currentContent;
   }
 
   function latestTurn(role: 'interviewer' | 'interviewee', turns: InterviewTurn[] = interviewTurnsRef.current) {
@@ -713,7 +932,7 @@ export default function App() {
       interviewTurnsRef.current = turnPayload.turns;
       setInterviewTranscript(nextTranscript);
       setInterviewTurns(turnPayload.turns);
-      setBody(buildInterviewNoteBody(nextTranscript, interviewGuidanceRef.current));
+      setBody(nextTranscript);
       setTranscriptionStatus(`Listening... (${result.model})`);
 
       const interviewerTurn = selectCoachTargetTurn(turnPayload.turns, nextTranscript);
@@ -749,7 +968,7 @@ export default function App() {
         buildCoachFallback(interviewerTurn, latestIntervieweeTurn, 3);
       lastCoachedInterviewerTurnIdRef.current = interviewerTurn.id;
       setInterviewGuidance(normalizedCoach);
-      setBody(buildInterviewNoteBody(nextTranscript, normalizedCoach));
+      setBody(nextTranscript);
     } catch (error) {
       setTranscriptionStatus(
         error instanceof Error ? error.message : 'Interview guidance refresh failed.',
@@ -795,7 +1014,7 @@ export default function App() {
         normalizeCoachText(coachDraft, targetLines) ||
         buildCoachFallback(interviewerTurn, intervieweeTurn, targetLines);
       setInterviewGuidance(normalized);
-      setBody(buildInterviewNoteBody(interviewTranscriptRef.current, normalized));
+      setBody(interviewTranscriptRef.current);
     } finally {
       setInterviewGuidanceBusy(false);
     }
@@ -815,8 +1034,33 @@ export default function App() {
   useEffect(() => {
     if (!selectedNote) return;
     setTitle(selectedNote.frontmatter.title);
-    setBody(selectedNote.body);
+    setBody(selectedNote.content);
+    setNoteKind(selectedNote.kind);
+    setContentFormat(selectedNote.content_format);
+    setShowMarkdownSource(false);
     setTags(selectedNote.frontmatter.tags.join(', '));
+
+    if (selectedNote.kind === 'interview_assist') {
+      const session = getInterviewSession(selectedNote);
+      const transcript = session?.transcript ?? selectedNote.content;
+      const guidance = session?.guidance ?? '';
+      const turns = session?.turns ?? [];
+      interviewTranscriptRef.current = transcript;
+      interviewTurnsRef.current = turns;
+      interviewGuidanceRef.current = guidance;
+      setInterviewTranscript(transcript);
+      setInterviewTurns(turns);
+      setInterviewGuidance(guidance);
+      lastCoachedInterviewerTurnIdRef.current =
+        session?.last_coached_interviewer_turn_id ?? null;
+      return;
+    }
+
+    if (selectedNote.kind === 'transcript') {
+      const session = getTranscriptSession(selectedNote);
+      setBody(session?.transcript ?? selectedNote.content);
+      return;
+    }
   }, [selectedNote?.frontmatter.id]);
 
   useDebouncedEffect(
@@ -829,17 +1073,33 @@ export default function App() {
       const payload = {
         id: selectedId,
         title: title.trim() || 'Untitled note',
-        body,
+        content: noteKind === 'interview_assist' ? interviewTranscriptRef.current || body : body,
         tags: tags
           .split(',')
           .map((tag) => tag.trim())
           .filter(Boolean),
+        kind: noteKind,
+        content_format: contentFormat,
+        session:
+          noteKind === 'interview_assist'
+            ? buildInterviewSession(
+                interviewTranscriptRef.current || body,
+                interviewGuidanceRef.current,
+                interviewTurnsRef.current,
+              )
+            : noteKind === 'transcript'
+              ? buildTranscriptSession(body)
+              : null,
       };
 
       const unchanged =
         current.frontmatter.title === payload.title &&
-        current.body === payload.body &&
-        current.frontmatter.tags.join('|') === payload.tags.join('|');
+        current.content === payload.content &&
+        current.kind === payload.kind &&
+        current.content_format === payload.content_format &&
+        current.frontmatter.tags.join('|') === payload.tags.join('|') &&
+        serializeExistingSessionForCompare(current.session ?? null) ===
+          serializeSessionForCompare(noteKind, body);
 
       if (unchanged) return;
 
@@ -857,7 +1117,7 @@ export default function App() {
           setSaving(false);
         });
     },
-    [selectedId, title, body, tags, notes],
+    [selectedId, title, body, tags, noteKind, contentFormat, notes, interviewTranscript, interviewGuidance, interviewTurns],
     280,
   );
 
@@ -865,8 +1125,10 @@ export default function App() {
     try {
       const created = await createNote({
         title: 'Untitled note',
-        body: DEFAULT_BODY,
+        content: DEFAULT_BODY,
         tags: [],
+        kind: 'note',
+        content_format: 'plain_text',
       });
 
       setNotes((prev) => [created, ...prev]);
@@ -890,7 +1152,7 @@ export default function App() {
     setAiOutput('');
 
     try {
-      await streamTransform(selectedId, body, action, (token) => {
+      await streamTransform(selectedId, buildTransformContent(selectedNote, body), action, (token) => {
         setAiOutput((prev) => prev + token);
       });
       setMessage('AI transform complete');
@@ -949,33 +1211,39 @@ export default function App() {
     }
   }
 
-  function setPendingAuthState(state: string | null) {
-    if (state) {
-      localStorage.setItem('notebook_pending_desktop_auth_state', state);
-      setPendingDesktopAuthState(state);
-      authPollErrorShownRef.current = false;
-      return;
-    }
-    localStorage.removeItem('notebook_pending_desktop_auth_state');
-    setPendingDesktopAuthState(null);
-    authPollErrorShownRef.current = false;
+  async function applyDesktopSession(session: SupabaseSessionPayload) {
+    const rendererSession =
+      (await window.notebookDesktop?.saveAuthSession?.(session)) ?? {
+        accessToken: session.access_token,
+        expiresAt: session.expires_at ?? null,
+        userId: session.user.id,
+        userEmail: session.user.email ?? null,
+      };
+    applyRendererSession(rendererSession);
   }
 
-  function applyDesktopSession(sessionToken: string, userId: string) {
-    localStorage.setItem('notebook_has_visited', 'true');
-    localStorage.setItem('notebook_session_token', sessionToken);
-    localStorage.setItem('notebook_session_user_id', userId);
-    setPendingAuthState(null);
-    setSessionUserId(userId);
-    setShowSplash(false);
+  async function finishDesktopAuth(rawUrl: string): Promise<boolean> {
+    setMessage('Finishing desktop sign in...');
+    const session = await completeDesktopAuthCallback(rawUrl);
+    if (!session?.user?.id) {
+      setAuthPending(false);
+      setMessage('Desktop opened, but sign-in could not be completed. Click Sign In again.');
+      return false;
+    }
+    await applyDesktopSession(session);
+    return true;
   }
 
   async function handleStartDesktopSignIn() {
     if (authBusy) return;
-    if (pendingDesktopAuthState && !sessionUserId) {
+    if (authPending && !sessionUserId) {
       if (manualSignInUrl) {
         try {
-          await window.notebookDesktop.openExternal(manualSignInUrl);
+          if (window.notebookDesktop?.openExternal) {
+            await window.notebookDesktop.openExternal(manualSignInUrl);
+          } else {
+            window.open(manualSignInUrl, '_blank', 'noopener,noreferrer');
+          }
           setMessage('Re-opened sign-in in browser. Complete auth there.');
         } catch {
           setMessage('Sign-in is still pending in browser. Complete auth to continue.');
@@ -986,26 +1254,23 @@ export default function App() {
       return;
     }
     setManualSignInUrl(null);
+    authCallbackInFlightRef.current = null;
+    lastHandledAuthCallbackRef.current = null;
     setAuthBusy(true);
     try {
-      const { authUrl, state, browserOpened } = await startDesktopAuthFlow();
-      setManualSignInUrl(authUrl);
-      setPendingAuthState(state);
+      const { url, browserOpened } = await startDesktopGoogleSignIn();
+      setManualSignInUrl(url);
+      setAuthPending(true);
       if (browserOpened) {
         setMessage('Complete sign in in browser. Desktop will continue automatically.');
       } else {
         setMessage('Browser did not open automatically. Use Open Sign-In Page below.');
       }
     } catch (error) {
-      const fallback = 'Unable to open browser automatically.';
+      const fallback = 'Unable to start desktop sign in.';
+      setManualSignInUrl(null);
       if (error instanceof Error) {
-        const match = error.message.match(/https?:\/\/\S+/);
-        if (match?.[0]) {
-          setManualSignInUrl(match[0]);
-          setMessage(`${fallback} Click the button below to continue.`);
-        } else {
-          setMessage(error.message || fallback);
-        }
+        setMessage(error.message || fallback);
       } else {
         setMessage(fallback);
       }
@@ -1014,25 +1279,76 @@ export default function App() {
     }
   }
 
+  async function handleSendMagicLink() {
+    if (authBusy) return;
+    authCallbackInFlightRef.current = null;
+    lastHandledAuthCallbackRef.current = null;
+    setAuthBusy(true);
+    try {
+      await sendDesktopMagicLink(magicLinkEmail);
+      setAuthPending(true);
+      setManualSignInUrl(null);
+      setMessage('Magic link sent. Open your email and continue sign in.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to send magic link.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function handleDesktopAuthCallback(rawUrl: string) {
+    if (authCallbackInFlightRef.current === rawUrl || lastHandledAuthCallbackRef.current === rawUrl) {
+      return;
+    }
+    authCallbackInFlightRef.current = rawUrl;
     try {
       const parsed = new URL(rawUrl);
-      const code = parsed.searchParams.get('code');
-      if (!code) {
-        setMessage('Desktop opened, but no sign-in code was found. Click Sign In again from splash.');
+      if (parsed.host === 'open') {
+        setMessage('Desktop app opened.');
+        lastHandledAuthCallbackRef.current = rawUrl;
         return;
       }
-      setMessage('Finishing desktop sign in...');
-      const response = await completeDesktopAuth(code);
-      if (!response.session_token || !response.user_id) {
-        setMessage('Unable to complete sign in.');
+      const completed = await finishDesktopAuth(rawUrl);
+      if (!completed) {
         return;
       }
-
-      applyDesktopSession(response.session_token, response.user_id);
+      lastHandledAuthCallbackRef.current = rawUrl;
       setMessage('Signed in. Desktop is ready.');
     } catch (error) {
+      setAuthPending(false);
       setMessage(error instanceof Error ? error.message : 'Desktop sign in failed');
+    } finally {
+      if (authCallbackInFlightRef.current === rawUrl) {
+        authCallbackInFlightRef.current = null;
+      }
+    }
+  }
+
+  async function handleOpenManualSignIn() {
+    if (!manualSignInUrl) return;
+    try {
+      if (window.notebookDesktop?.openExternal) {
+        await window.notebookDesktop.openExternal(manualSignInUrl);
+      } else {
+        window.open(manualSignInUrl, '_blank', 'noopener,noreferrer');
+      }
+      setMessage('Opened sign-in in your default browser.');
+    } catch (error) {
+      setMessage(
+        error instanceof Error && error.message
+          ? `Unable to open browser automatically: ${error.message}`
+          : 'Unable to open the sign-in page automatically. Copy the sign-in URL below.',
+      );
+    }
+  }
+
+  async function handleCopyManualSignInUrl() {
+    if (!manualSignInUrl) return;
+    try {
+      await navigator.clipboard.writeText(manualSignInUrl);
+      setMessage('Copied the sign-in URL. Paste it into your browser.');
+    } catch {
+      setMessage('Unable to copy automatically. Select the URL below and open it in your browser.');
     }
   }
 
@@ -1048,7 +1364,7 @@ export default function App() {
         setDriveStatus(drive);
         setMessage(
           drive.connected
-            ? `Drive mirror enabled (${drive.folder_name || 'Notebook AI'}).`
+            ? describeSyncStatus(sync, drive.folder_name || 'Notebook AI')
             : 'Drive mirror enabled. Connect Google Drive to start mirroring.',
         );
       } else {
@@ -1061,16 +1377,55 @@ export default function App() {
     }
   }
 
+  async function handleAcceptLegal() {
+    if (!privacyAccepted || !termsAccepted) {
+      setLegalError('Accept both documents to continue.');
+      return;
+    }
+
+    const privacyDoc = legalDocuments.find((doc) => doc.type === 'privacy_policy');
+    const termsDoc = legalDocuments.find((doc) => doc.type === 'user_agreement');
+    if (!privacyDoc || !termsDoc) {
+      setLegalError('Legal documents are unavailable. Retry in a moment.');
+      return;
+    }
+
+    setLegalBusy(true);
+    setLegalError('');
+    try {
+      await acceptLegalDocuments([
+        { type: 'privacy_policy', version: privacyDoc.version },
+        { type: 'user_agreement', version: termsDoc.version },
+      ]);
+      setLegalStage('ready');
+      setMessage('Legal acceptance complete. Loading your workspace...');
+    } catch (error) {
+      setLegalError(error instanceof Error ? error.message : 'Unable to save legal acceptance.');
+    } finally {
+      setLegalBusy(false);
+    }
+  }
+
+  function handleRetryLegalCheck() {
+    setLegalReloadToken((value) => value + 1);
+  }
+
   async function handleLogout() {
     if (!sessionUserId || logoutBusy) return;
     setLogoutBusy(true);
     try {
-      localStorage.removeItem('notebook_has_visited');
-      localStorage.removeItem('notebook_session_token');
-      localStorage.removeItem('notebook_session_user_id');
-      setPendingAuthState(null);
+      await logoutCloudSession().catch(() => {
+        /* ignore logout failures for expired sessions */
+      });
+      await window.notebookDesktop.clearAuthSession?.();
+      authCallbackInFlightRef.current = null;
+      lastHandledAuthCallbackRef.current = null;
       setSessionUserId(null);
+      setAuthPending(false);
       setManualSignInUrl(null);
+      setLegalStage('checking');
+      setLegalDocuments([]);
+      setLegalError('');
       setShowSplash(true);
       setSettingsOpen(false);
       setMessage('Signed out successfully.');
@@ -1084,45 +1439,167 @@ export default function App() {
     try {
       const status = await fetchGoogleDriveStatus();
       setDriveStatus(status);
+      if (status.connected && storagePreference.mode === 'local_and_drive') {
+        setSyncStatus((prev) => ({
+          enabled: prev?.enabled ?? true,
+          pending_ops: prev?.pending_ops ?? 0,
+          state: 'syncing',
+          phase: 'preparing',
+          current_item: 'Checking Drive mirror',
+          completed_items: 0,
+          total_items: Math.max(prev?.pending_ops ?? prev?.total_items ?? 1, 1),
+          last_run_at: prev?.last_run_at ?? null,
+          last_synced_at: prev?.last_synced_at ?? null,
+          last_error: null,
+        }));
+        const sync = await runSyncNow();
+        setSyncStatus(sync);
+        setMessage(describeSyncStatus(sync, status.folder_name || 'Notebook AI'));
+        return;
+      }
       setMessage(
         status.connected
           ? `Google Drive connected (${status.folder_name || 'Notebook AI'}).`
           : 'Google Drive is not connected yet.',
       );
     } catch (error) {
+      setSyncStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              state: 'error',
+              phase: 'idle',
+              current_item: null,
+              last_error: error instanceof Error ? error.message : 'Unable to load Google Drive status',
+            }
+          : prev,
+      );
       setMessage(error instanceof Error ? error.message : 'Unable to load Google Drive status');
     } finally {
       setDriveStatusBusy(false);
     }
   }
 
-  function handleConnectGoogleDrive() {
-    openGoogleDriveConnect();
-    setMessage('Google Drive connect opened in browser. Approve access, then click Refresh status.');
+  async function pollForDriveConnection() {
+    if (driveConnectPollingRef.current) return;
+    driveConnectPollingRef.current = true;
+    setDriveStatusBusy(true);
+    try {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const status = await fetchGoogleDriveStatus().catch(() => null);
+        if (status?.connected) {
+          setDriveStatus(status);
+          if (storagePreference.mode === 'local_and_drive') {
+            setSyncStatus((prev) => ({
+              enabled: prev?.enabled ?? true,
+              pending_ops: prev?.pending_ops ?? 0,
+              state: 'syncing',
+              phase: 'preparing',
+              current_item: 'Checking Drive mirror',
+              completed_items: 0,
+              total_items: Math.max(prev?.pending_ops ?? prev?.total_items ?? 1, 1),
+              last_run_at: prev?.last_run_at ?? null,
+              last_synced_at: prev?.last_synced_at ?? null,
+              last_error: null,
+            }));
+            const sync = await runSyncNow();
+            setSyncStatus(sync);
+            setMessage(describeSyncStatus(sync, status.folder_name || 'Notebook AI'));
+          } else {
+            setMessage(`Google Drive connected (${status.folder_name || 'Notebook AI'}).`);
+          }
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      }
+      setMessage('Finish Google Drive approval in your browser, then click Refresh status.');
+    } catch (error) {
+      setSyncStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              state: 'error',
+              phase: 'idle',
+              current_item: null,
+              last_error: error instanceof Error ? error.message : 'Unable to start Drive mirroring',
+            }
+          : prev,
+      );
+      setMessage(error instanceof Error ? error.message : 'Unable to start Drive mirroring');
+    } finally {
+      driveConnectPollingRef.current = false;
+      setDriveStatusBusy(false);
+    }
+  }
+
+  async function handleConnectGoogleDrive() {
+    try {
+      await openGoogleDriveConnect();
+      setMessage('Approve Google Drive access in your browser. Notebook AI will start mirroring automatically.');
+      void pollForDriveConnection();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to start Google Drive connection');
+    }
   }
 
   async function handleChooseLocalFolder() {
     try {
-      const selected = await window.notebookDesktop.chooseDirectory();
+      const selected = await window.notebookDesktop?.chooseDirectory?.();
       if (!selected) return;
       const updatedPath = await setLocalRoot(selected);
       setLocalRootPath(updatedPath);
       setStoragePreference((prev) => ({ ...prev, local_root: updatedPath }));
-      setMessage('Local storage folder updated.');
+      if (storagePreference.mode === 'local_and_drive') {
+        const sync = await fetchSyncStatus().catch(() => null);
+        if (sync) {
+          setSyncStatus(sync);
+          setMessage(`Local folder updated. ${describeSyncStatus(sync, driveStatus.folder_name || 'Notebook AI')}`);
+        } else {
+          setMessage('Local folder updated. Reconciling with Google Drive...');
+        }
+      } else {
+        setMessage('Local storage folder updated.');
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to update local folder');
     }
   }
 
   async function handleRunSyncNow() {
+    setSyncActionBusy(true);
     setStorageBusy(true);
     try {
+      setMessage('Starting Drive sync...');
+      setSyncStatus((prev) => ({
+        enabled: prev?.enabled ?? true,
+        pending_ops: prev?.pending_ops ?? 0,
+        state: 'syncing',
+        phase: 'preparing',
+        current_item: 'Checking Drive mirror',
+        completed_items: 0,
+        total_items: Math.max(prev?.pending_ops ?? prev?.total_items ?? 1, 1),
+        last_run_at: prev?.last_run_at ?? null,
+        last_synced_at: prev?.last_synced_at ?? null,
+        last_error: null,
+      }));
       const status = await runSyncNow();
       setSyncStatus(status);
-      setMessage('Drive sync run complete.');
+      setMessage(describeSyncStatus(status, driveStatus.folder_name || 'Notebook AI'));
     } catch (error) {
+      setSyncStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              state: 'error',
+              phase: 'idle',
+              current_item: null,
+              last_error: error instanceof Error ? error.message : 'Unable to run sync',
+            }
+          : prev,
+      );
       setMessage(error instanceof Error ? error.message : 'Unable to run sync');
     } finally {
+      setSyncActionBusy(false);
       setStorageBusy(false);
     }
   }
@@ -1223,17 +1700,24 @@ export default function App() {
       sessionMode === 'interview_assist'
         ? `Interview Assist ${new Date().toLocaleTimeString()}`
         : `Transcript ${new Date().toLocaleTimeString()}`;
-    const initialBody =
-      sessionMode === 'interview_assist' ? buildInterviewNoteBody('', '') : '';
+    const initialBody = '';
     const created = await createNote({
       title: transcriptTitle,
-      body: initialBody,
+      content: initialBody,
       tags: sessionMode === 'interview_assist' ? ['interview-assist', 'transcript'] : ['transcript'],
+      kind: sessionMode === 'interview_assist' ? 'interview_assist' : 'transcript',
+      content_format: 'plain_text',
+      session:
+        sessionMode === 'interview_assist'
+          ? buildInterviewSession('', '', [])
+          : buildTranscriptSession(''),
     });
     setNotes((prev) => [created, ...prev]);
     setSelectedId(created.frontmatter.id);
     setTitle(created.frontmatter.title);
     setBody(initialBody);
+    setNoteKind(created.kind);
+    setContentFormat(created.content_format);
     setTags(created.frontmatter.tags.join(', '));
 
     setRecording(true);
@@ -1461,22 +1945,51 @@ export default function App() {
   }, []);
 
   if (showSplash) {
-    const authPending = Boolean(pendingDesktopAuthState && !sessionUserId);
     return (
       <SplashScreen
         onLogin={() => {
-          if (sessionUserId) {
-            localStorage.setItem('notebook_has_visited', 'true');
-            setShowSplash(false);
-            return;
-          }
           void handleStartDesktopSignIn();
         }}
-        authBusy={authBusy}
+        onReturnToApp={() => setShowSplash(false)}
+        onLogout={() => {
+          void handleLogout();
+        }}
+        onMagicLinkEmailChange={setMagicLinkEmail}
+        onSendMagicLink={() => {
+          void handleSendMagicLink();
+        }}
+        onOpenManualSignIn={() => {
+          void handleOpenManualSignIn();
+        }}
+        onCopyManualSignInUrl={() => {
+          void handleCopyManualSignInUrl();
+        }}
+        authBusy={authBusy || !authReady}
         authPending={authPending}
+        logoutBusy={logoutBusy}
         sessionUserId={sessionUserId}
-        statusMessage={message}
+        statusMessage={authReady ? message : 'Loading secure session...'}
         manualSignInUrl={manualSignInUrl}
+        magicLinkEmail={magicLinkEmail}
+      />
+    );
+  }
+
+  if (sessionUserId && legalStage !== 'ready') {
+    return (
+      <LegalAcceptanceGate
+        stage={legalStage}
+        documents={legalDocuments}
+        busy={legalBusy}
+        errorMessage={legalError}
+        privacyAccepted={privacyAccepted}
+        termsAccepted={termsAccepted}
+        onPrivacyAcceptedChange={setPrivacyAccepted}
+        onTermsAcceptedChange={setTermsAccepted}
+        onAccept={() => {
+          void handleAcceptLegal();
+        }}
+        onRetry={handleRetryLegalCheck}
       />
     );
   }
@@ -1487,6 +2000,10 @@ export default function App() {
     aiPanelOpen ? '340px' : '48px',
   ].join(' ');
   const coachTargetTurn = selectCoachTargetTurn(interviewTurns, interviewTranscript);
+  const showInterviewNoteView = selectedNote?.kind === 'interview_assist';
+  const showTranscriptNoteView = isTranscriptNote(selectedNote);
+  const showMarkdownPreview = isMarkdownNote(selectedNote) && !showMarkdownSource;
+  const transcriptViewText = getTranscriptSession(selectedNote)?.transcript ?? body;
 
   return (
     <main className={`app-shell${isMacPlatform ? ' is-mac' : ''}`} style={{ gridTemplateColumns: gridCols }}>
@@ -1508,6 +2025,10 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenSplash={() => setShowSplash(true)}
           onCollapse={() => setSidebarOpen(false)}
+          onLogout={() => {
+            void handleLogout();
+          }}
+          logoutBusy={logoutBusy}
         />
       ) : (
         <div className="collapsed-sidebar">
@@ -1536,9 +2057,28 @@ export default function App() {
           </div>
 
           <div className="header-right">
+            {isMarkdownNote(selectedNote) ? (
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => setShowMarkdownSource((prev) => !prev)}
+              >
+                {showMarkdownSource ? 'Preview markdown' : 'Show source'}
+              </button>
+            ) : null}
             <span className="status-pill">{saving ? 'Saving...' : message}</span>
           </div>
         </header>
+
+        {storagePreference.mode === 'local_and_drive' ? (
+          <div className="sync-banner-wrap">
+            <SyncStatusBanner
+              syncStatus={syncStatus}
+              driveFolderName={driveStatus.folder_name || 'Notebook AI'}
+              onOpenSettings={() => setSettingsOpen(true)}
+            />
+          </div>
+        ) : null}
 
         <div className="transcription-anchor">
           <TranscriptionPanel
@@ -1553,7 +2093,7 @@ export default function App() {
           />
         </div>
 
-        {activeSessionMode === 'interview_assist' ? (
+        {showInterviewNoteView ? (
           <section className="interview-chat-screen" aria-live="polite">
             <header className="interview-chat-header">
               <h3>Interview Conversation</h3>
@@ -1651,6 +2191,16 @@ export default function App() {
               <div ref={interviewBottomSentinelRef} className="interview-thread-bottom-sentinel" />
             </div>
           </section>
+        ) : showTranscriptNoteView ? (
+          <TranscriptSessionView transcript={transcriptViewText} />
+        ) : showMarkdownPreview ? (
+          <section className="note-preview-panel">
+            <header className="note-preview-panel__header">
+              <h3>Markdown Preview</h3>
+              <span className="status-pill">Imported note</span>
+            </header>
+            <MarkdownPreview content={body} />
+          </section>
         ) : (
           <textarea
             className="note-editor"
@@ -1692,7 +2242,11 @@ export default function App() {
         onSaveByok={() => {
           void handleSaveByok();
         }}
-        onOpenOAuth={openOpenAIOAuth}
+        onOpenOAuth={() => {
+          void openOpenAIOAuth().catch((error) => {
+            setMessage(error instanceof Error ? error.message : 'Unable to start OpenAI OAuth');
+          });
+        }}
         disconnectingProvider={providerDisconnecting}
         onDisconnectProvider={(p) => {
           void handleDisconnectProvider(p);
@@ -1705,6 +2259,8 @@ export default function App() {
         localRootPath={localRootPath}
         storageBusy={storageBusy}
         syncPendingOps={syncStatus?.pending_ops ?? 0}
+        syncStatus={syncStatus}
+        syncActionBusy={syncActionBusy}
         driveConnected={driveStatus.connected}
         driveFolderName={driveStatus.folder_name || 'Notebook AI'}
         driveStatusBusy={driveStatusBusy}
@@ -1721,7 +2277,7 @@ export default function App() {
           void handleLogout();
         }}
         onConnectDrive={() => {
-          handleConnectGoogleDrive();
+          void handleConnectGoogleDrive();
         }}
         onRefreshDriveStatus={() => {
           void handleRefreshDriveStatus();

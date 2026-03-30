@@ -11,8 +11,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@notebook-ai/app-core": "0.1.0",
     "@notebook-ai/contracts": "0.1.0",
     "@notebook-ai/theme": "0.1.0",
+    "@supabase/supabase-js": "^2.58.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.473.0",
     "react": "^18.3.1",

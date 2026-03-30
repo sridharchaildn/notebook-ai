@@ -4,7 +4,14 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UICard, UIButton, UIInput, UIPill } from '@notebook-ai/ui';
-import { cloudApiBaseUrl, completeDesktopExchange, saveProviderByok, saveStoragePreference } from '../../lib/cloud';
+import {
+  errorMessage,
+  getCurrentSupabaseUser,
+  saveProviderByok,
+  saveStoragePreference,
+  startGoogleDriveOAuth,
+  startOpenAIOAuth,
+} from '../../lib/cloud';
 import { ThemeToggle } from '../components/ThemeToggle';
 import { AppLogo } from '../components/AppLogo';
 
@@ -26,8 +33,7 @@ function CloudIcon() {
 
 export default function OnboardingPage() {
   const router = useRouter();
-  const [userId, setUserId] = useState('');
-  const [desktopState, setDesktopState] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState('');
 
   const [openrouterKey, setOpenrouterKey] = useState('');
   const [openaiKey, setOpenaiKey] = useState('');
@@ -36,48 +42,36 @@ export default function OnboardingPage() {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const nextUserId = params.get('user_id') || localStorage.getItem('notebook_web_user_id') || '';
-    setUserId(nextUserId);
-    setDesktopState(params.get('state'));
+    void getCurrentSupabaseUser()
+      .then((user) => {
+        setUserEmail(user.email ?? '');
+      })
+      .catch(() => {
+        const params = new URLSearchParams(window.location.search);
+        setUserEmail(params.get('email') || '');
+      });
   }, []);
 
   async function handleSaveSettings() {
-    if (!userId) {
-      setMessage('Missing user id. Please restart signup.');
-      return;
-    }
-
     setBusy(true);
     setMessage('');
     try {
       if (openaiKey.trim()) {
-        await saveProviderByok(userId, 'openai', openaiKey.trim());
+        await saveProviderByok('openai', openaiKey.trim());
       }
       if (openrouterKey.trim()) {
-        await saveProviderByok(userId, 'openrouter', openrouterKey.trim());
+        await saveProviderByok('openrouter', openrouterKey.trim());
       }
-      await saveStoragePreference(userId, storageMode);
-
-      if (desktopState) {
-        const result = await completeDesktopExchange(desktopState, userId);
-        if (result.deep_link_url) {
-          window.location.href = result.deep_link_url;
-          setMessage('Returning to desktop app...');
-          return;
-        }
-      }
+      await saveStoragePreference(storageMode);
 
       setMessage('Onboarding complete. Redirecting to home...');
       router.replace('/home');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to save onboarding settings.');
+      setMessage(errorMessage(error, 'Unable to save onboarding settings.'));
     } finally {
       setBusy(false);
     }
   }
-
-  const cloudBase = cloudApiBaseUrl();
   const hasApiKey = Boolean(openaiKey.trim() || openrouterKey.trim());
   const isDriveMirror = storageMode === 'local_and_drive';
 
@@ -91,7 +85,7 @@ export default function OnboardingPage() {
               <span style={{ fontWeight: 700, fontSize: '0.92rem', letterSpacing: '-0.02em' }}>Notebook AI</span>
             </div>
             <div className="row">
-              <UIPill>{desktopState ? 'Desktop handoff' : 'Web setup'}</UIPill>
+              <UIPill>Web setup</UIPill>
               <ThemeToggle />
             </div>
           </div>
@@ -111,6 +105,7 @@ export default function OnboardingPage() {
 
           <h1 className="onboarding-title">Set up your workspace</h1>
           <p className="onboarding-subtitle">Connect AI and pick storage in two quick steps. You can change everything later in Settings.</p>
+          {userEmail ? <p className="muted" style={{ marginTop: '-8px' }}>Signed in as {userEmail}</p> : null}
 
           <div className="onboarding-grid">
             <UICard className="panel onboarding-step">
@@ -131,8 +126,11 @@ export default function OnboardingPage() {
                   variant="ghost"
                   style={{ width: '100%', justifyContent: 'center' }}
                   onClick={() => {
-                    if (!userId) return;
-                    window.location.href = `${cloudBase}/providers/openai/oauth/start?user_id=${encodeURIComponent(userId)}`;
+                    void startOpenAIOAuth().then((result) => {
+                      window.location.href = result.url;
+                    }).catch((error) => {
+                      setMessage(errorMessage(error, 'Unable to start OpenAI OAuth.'));
+                    });
                   }}
                 >
                   Connect OpenAI OAuth
@@ -181,8 +179,11 @@ export default function OnboardingPage() {
                   variant="ghost"
                   style={{ width: '100%', justifyContent: 'center' }}
                   onClick={() => {
-                    if (!userId) return;
-                    window.location.href = `${cloudBase}/integrations/google-drive/oauth/start?user_id=${encodeURIComponent(userId)}`;
+                    void startGoogleDriveOAuth().then((result) => {
+                      window.location.href = result.url;
+                    }).catch((error) => {
+                      setMessage(errorMessage(error, 'Unable to start Google Drive OAuth.'));
+                    });
                   }}
                 >
                   Connect Google Drive
@@ -197,8 +198,6 @@ export default function OnboardingPage() {
               <UIButton onClick={() => { void handleSaveSettings(); }} disabled={busy}>
                 {busy ? (
                   <><span className="spinner" /> Saving...</>
-                ) : desktopState ? (
-                  'Finish and Return to Desktop'
                 ) : (
                   'Finish Setup'
                 )}

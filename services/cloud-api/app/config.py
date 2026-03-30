@@ -14,12 +14,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_path: Path = Path(".notebook-ai/cloud-api.db")
-    app_jwt_secret: str = "dev-app-secret"
-    app_jwt_exp_minutes: int = 240
     credential_secret: str = "dev-credential-secret"
-    dev_user_id: str = "local-dev-user"
 
+    supabase_url: str = "http://127.0.0.1:54321"
+    supabase_anon_key: str | None = None
+    supabase_secret_key: str | None = None
+    supabase_service_role_key: str | None = None
     supabase_jwt_secret: str | None = None
     supabase_jwks_url: str | None = None
 
@@ -29,9 +29,6 @@ class Settings(BaseSettings):
     openai_oauth_client_secret: str | None = None
     openai_oauth_redirect_uri: str = "http://127.0.0.1:8790/providers/openai/oauth/callback"
     openai_oauth_scope: str = "openid profile email"
-    web_app_url: str = "http://127.0.0.1:3000"
-    desktop_callback_scheme: str = "notebook-ai://auth/callback"
-    desktop_auth_path: str = "/desktop/auth"
 
     privacy_policy_version: str = "2026-03-25"
     privacy_policy_url: str = "https://notebook-ai.app/legal/privacy"
@@ -47,7 +44,11 @@ class Settings(BaseSettings):
     google_drive_default_folder_name: str = "Notebook AI"
     debug: bool = False
 
-    @field_validator("database_path", mode="before")
+    @field_validator("supabase_url", mode="before")
     @classmethod
-    def expand_path(cls, value: str | Path) -> Path:
-        return Path(value).expanduser().resolve()
+    def normalize_supabase_url(cls, value: str | Path) -> str:
+        return str(value).strip().rstrip("/")
+
+    @property
+    def supabase_server_key(self) -> str | None:
+        return self.supabase_secret_key or self.supabase_service_role_key

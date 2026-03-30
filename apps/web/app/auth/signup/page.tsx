@@ -4,15 +4,10 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UICard, UIButton, UIInput } from '@notebook-ai/ui';
-import { acceptLegalDocuments, fetchLegalDocuments } from '../../../lib/cloud';
+import { acceptLegalDocuments, fetchLegalDocuments, getCurrentSupabaseUser } from '../../../lib/cloud';
 import { buildAuthCallbackUrl, getSupabaseClient, isSupabaseConfigured } from '../../../lib/supabase';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { AppLogo } from '../../components/AppLogo';
-
-function toUserId(email: string) {
-  const cleaned = email.trim().toLowerCase().replace(/[^a-z0-9@._-]/g, '');
-  return cleaned || `user-${Date.now()}`;
-}
 
 function CheckSvg() {
   return (
@@ -50,15 +45,10 @@ export default function SignUpPage() {
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [privacyVersion, setPrivacyVersion] = useState('2026-03-25');
   const [termsVersion, setTermsVersion] = useState('2026-03-25');
-  const [desktopState, setDesktopState] = useState<string | null>(null);
-  const [prefilledUserId, setPrefilledUserId] = useState<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    setDesktopState(params.get('state'));
-    const queryUserId = params.get('user_id');
     const queryEmail = params.get('email');
-    if (queryUserId) setPrefilledUserId(queryUserId);
     if (queryEmail) setEmail(queryEmail);
   }, []);
 
@@ -85,7 +75,7 @@ export default function SignUpPage() {
     setMessage('');
     try {
       const supabase = getSupabaseClient();
-      const redirectTo = buildAuthCallbackUrl('signup', desktopState);
+      const redirectTo = buildAuthCallbackUrl('signup');
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -108,25 +98,17 @@ export default function SignUpPage() {
       return;
     }
 
-    const resolvedUserId = prefilledUserId || localStorage.getItem('notebook_web_user_id') || null;
-    if (!resolvedUserId && !email.trim()) {
-      setMessage('Enter your email or continue with Google to create account.');
-      return;
-    }
-
     setLoading(true);
     setMessage('');
     try {
-      const userId = resolvedUserId || toUserId(email);
-      await acceptLegalDocuments(userId, [
+      const currentUser = await getCurrentSupabaseUser();
+      await acceptLegalDocuments([
         { type: 'privacy_policy', version: privacyVersion },
         { type: 'user_agreement', version: termsVersion },
       ]);
-      localStorage.setItem('notebook_web_user_id', userId);
 
       const next = new URLSearchParams();
-      next.set('user_id', userId);
-      if (desktopState) next.set('state', desktopState);
+      if (currentUser.email) next.set('email', currentUser.email);
       router.push(`/onboarding?${next.toString()}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to create account.');
@@ -135,9 +117,7 @@ export default function SignUpPage() {
     }
   }
 
-  const backHref = desktopState
-    ? `/auth/signin?state=${encodeURIComponent(desktopState)}`
-    : '/auth/signin';
+  const backHref = '/auth/signin';
 
   return (
     <main className="web-shell" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -177,7 +157,6 @@ export default function SignUpPage() {
                 onChange={setEmail}
                 placeholder="you@company.com"
                 type="email"
-                disabled={Boolean(prefilledUserId)}
               />
             </label>
 

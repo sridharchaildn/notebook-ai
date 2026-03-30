@@ -55,6 +55,7 @@ class TranscriptionService:
         provider: str = "openai",
         transcription_mode: str = "whisper",
         segment_id: int | None = None,
+        access_token: str | None = None,
     ) -> TranscriptionResult:
         log.debug(
             "transcribe_chunk: bytes=%s filename=%s content_type=%s provider=%s mode=%s",
@@ -70,6 +71,7 @@ class TranscriptionService:
                 audio_bytes=audio_bytes,
                 filename=filename,
                 content_type=content_type,
+                access_token=access_token,
             )
             result.segment_id = segment_id
             return result
@@ -79,6 +81,7 @@ class TranscriptionService:
             filename=filename,
             content_type=content_type,
             provider=provider,
+            access_token=access_token,
         )
         result.segment_id = segment_id
         return result
@@ -89,9 +92,10 @@ class TranscriptionService:
         audio_bytes: bytes,
         filename: str,
         content_type: str,
+        access_token: str | None = None,
     ) -> TranscriptionResult:
-        or_key = await self._resolve_openrouter_api_key()
-        oa_key = await self._resolve_openai_api_key()
+        or_key = await self._resolve_openrouter_api_key(access_token=access_token)
+        oa_key = await self._resolve_openai_api_key(access_token=access_token)
 
         if or_key:
             url = f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions"
@@ -265,6 +269,7 @@ class TranscriptionService:
         filename: str,
         content_type: str,
         provider: str,
+        access_token: str | None = None,
     ) -> TranscriptionResult:
         if provider != "openai":
             msg = (
@@ -282,7 +287,7 @@ class TranscriptionService:
                 recoverable=False,
             )
 
-        api_key = await self._resolve_openai_api_key()
+        api_key = await self._resolve_openai_api_key(access_token=access_token)
         if not api_key:
             msg = (
                 "No OpenAI API key: set NOTEBOOK_LOCAL_OPENAI_API_KEY in the sidecar .env or "
@@ -370,31 +375,28 @@ class TranscriptionService:
             recoverable=last_recoverable,
         )
 
-    async def _resolve_openai_api_key(self) -> str | None:
+    async def _resolve_openai_api_key(self, access_token: str | None = None) -> str | None:
         local = (self.settings.openai_api_key or "").strip()
         if local:
             log.debug("OpenAI key source=local_env")
             return local
 
+        if not access_token:
+            return None
+
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 response = await client.get(
                     f"{self.settings.cloud_api_url}/providers/credential",
-                    params={
-                        "provider": "openai",
-                        "user_id": self.settings.cloud_user_id,
-                    },
+                    params={"provider": "openai"},
+                    headers={"Authorization": f"Bearer {access_token}"},
                 )
         except httpx.HTTPError as exc:
             log.debug("cloud openai credential fetch failed: %s", exc)
             return None
 
         if response.status_code != 200:
-            log.debug(
-                "cloud openai credential: status=%s user_id=%s",
-                response.status_code,
-                self.settings.cloud_user_id,
-            )
+            log.debug("cloud openai credential: status=%s", response.status_code)
             return None
 
         payload = response.json()
@@ -417,20 +419,21 @@ class TranscriptionService:
         log.debug("OpenAI key source=cloud_api_key")
         return secret
 
-    async def _resolve_openrouter_api_key(self) -> str | None:
+    async def _resolve_openrouter_api_key(self, access_token: str | None = None) -> str | None:
         local = (self.settings.openrouter_api_key or "").strip()
         if local:
             log.debug("OpenRouter key source=local_env")
             return local
 
+        if not access_token:
+            return None
+
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 response = await client.get(
                     f"{self.settings.cloud_api_url}/providers/credential",
-                    params={
-                        "provider": "openrouter",
-                        "user_id": self.settings.cloud_user_id,
-                    },
+                    params={"provider": "openrouter"},
+                    headers={"Authorization": f"Bearer {access_token}"},
                 )
         except httpx.HTTPError as exc:
             log.debug("cloud openrouter credential fetch failed: %s", exc)

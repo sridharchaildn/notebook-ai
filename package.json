@@ -10,9 +10,15 @@
   "scripts": {
     "dev:desktop": "npm --workspace @notebook-ai/desktop run dev",
     "dev:web": "npm --workspace @notebook-ai/web run dev",
+    "dev:sidecar": "cd services/local-sidecar && .venv/bin/python -m uvicorn app.main:app --reload --port 8787",
+    "dev:cloud": "cd services/cloud-api && .venv/bin/python -m uvicorn app.main:app --reload --port 8790",
+    "dev:services": "concurrently -n sidecar,cloud -c blue,magenta \"npm run dev:sidecar\" \"npm run dev:cloud\"",
     "build:desktop": "npm --workspace @notebook-ai/desktop run build",
     "build:web": "npm --workspace @notebook-ai/web run build",
     "test:desktop": "npm --workspace @notebook-ai/desktop run test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   },
   "engines": {
     "node": ">=20.10.0"

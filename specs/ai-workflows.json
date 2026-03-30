@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "transforms": [
+    {
+      "id": "summarize",
+      "label": "Summarize",
+      "output_mode": "plain_text"
+    },
+    {
+      "id": "rewrite",
+      "label": "Rewrite",
+      "output_mode": "plain_text"
+    },
+    {
+      "id": "extract_action_items",
+      "label": "Extract action items",
+      "output_mode": "plain_text"
+    },
+    {
+      "id": "interview_turns",
+      "label": "Interview turns",
+      "output_mode": "json"
+    },
+    {
+      "id": "interview_coach",
+      "label": "Interview coach",
+      "output_mode": "sse_text",
+      "max_lines": 3
+    }
+  ]
+}

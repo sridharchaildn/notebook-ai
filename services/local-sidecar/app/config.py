@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     cloud_api_url: str = "http://127.0.0.1:8790"
-    cloud_user_id: str = "local-dev-user"
     debug: bool = False
 
     @field_validator("notes_dir", "profile_path", "storage_profile_path", "sync_profile_path", mode="before")

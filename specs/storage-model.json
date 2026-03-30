@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "default_note_extension": ".note.json",
+  "legacy_extensions": [".md"],
+  "workspace_kinds": ["desktop_local_only", "drive_shared"],
+  "content_formats": ["plain_text", "markdown"]
+}

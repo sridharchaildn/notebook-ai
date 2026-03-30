@@ -7,7 +7,7 @@ import { UICard, UIButton } from '@notebook-ai/ui';
 import { AppLogo } from '../../components/AppLogo';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import {
-  completeDesktopExchange,
+  errorMessage,
   fetchLegalAcceptances,
   fetchLegalDocuments,
 } from '../../../lib/cloud';
@@ -17,9 +17,7 @@ export default function AuthCallbackPage() {
   const router = useRouter();
   const [status, setStatus] = useState('Completing sign in...');
   const [error, setError] = useState('');
-  const [stage, setStage] = useState<'session' | 'legal' | 'handoff' | 'done'>('session');
-  const [desktopFlow, setDesktopFlow] = useState(false);
-  const [manualDesktopLink, setManualDesktopLink] = useState<string | null>(null);
+  const [stage, setStage] = useState<'session' | 'legal' | 'done'>('session');
 
   useEffect(() => {
     void (async () => {
@@ -32,9 +30,7 @@ export default function AuthCallbackPage() {
 
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');
-        const desktopState = params.get('state');
         const intent = params.get('intent') === 'signup' ? 'signup' : 'signin';
-        setDesktopFlow(Boolean(desktopState));
         const supabase = getSupabaseClient();
 
         if (code) {
@@ -50,50 +46,28 @@ export default function AuthCallbackPage() {
         if (userError) throw userError;
         if (!user) throw new Error('No signed-in user found. Please try signing in again.');
 
-        localStorage.setItem('notebook_web_user_id', user.id);
-        if (user.email) {
-          localStorage.setItem('notebook_web_user_email', user.email);
-        }
-
         setStage('legal');
         setStatus('Checking legal acceptance...');
         const [docs, accepted] = await Promise.all([
           fetchLegalDocuments(),
-          fetchLegalAcceptances(user.id),
+          fetchLegalAcceptances(),
         ]);
         const acceptedPairs = new Set(accepted.map((entry) => `${entry.type}:${entry.version}`));
         const missingDocs = docs.filter((doc) => !acceptedPairs.has(`${doc.type}:${doc.version}`));
 
         if (missingDocs.length > 0) {
-          const next = new URLSearchParams({ user_id: user.id });
-          if (desktopState) next.set('state', desktopState);
+          const next = new URLSearchParams();
           if (user.email) next.set('email', user.email);
           setStatus('Legal acceptance required. Redirecting...');
           router.replace(`/auth/signup?${next.toString()}`);
           return;
         }
 
-        if (desktopState) {
-          setStage('handoff');
-          setStatus('Returning to desktop app...');
-          const result = await completeDesktopExchange(desktopState, user.id);
-          if (result.deep_link_url) {
-            setManualDesktopLink(result.deep_link_url);
-            window.location.href = result.deep_link_url;
-            window.setTimeout(() => {
-              setStatus('If desktop did not open, click Open Desktop App below.');
-            }, 1800);
-            return;
-          }
-        }
-
-        const next = new URLSearchParams({ user_id: user.id });
-        if (desktopState) next.set('state', desktopState);
         setStage('done');
         setStatus('Sign in complete. Redirecting...');
-        router.replace(intent === 'signin' && !desktopState ? '/home' : `/onboarding?${next.toString()}`);
+        router.replace(intent === 'signin' ? '/home' : '/onboarding');
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to complete sign in.');
+        setError(errorMessage(err, 'Unable to complete sign in.'));
       }
     })();
   }, [router]);
@@ -133,20 +107,8 @@ export default function AuthCallbackPage() {
                   ? 'Validating session'
                   : stage === 'legal'
                     ? 'Checking legal acceptance'
-                    : stage === 'handoff'
-                      ? 'Preparing desktop handoff'
-                      : 'Done'}
+                    : 'Done'}
               </div>
-            </div>
-          ) : null}
-          {!error && desktopFlow ? (
-            <div className="row" style={{ marginTop: 14 }}>
-              <a href={manualDesktopLink || 'notebook-ai://open'}>
-                <UIButton variant="ghost">Open Desktop App</UIButton>
-              </a>
-              <Link href="/home">
-                <UIButton variant="ghost">Continue on web</UIButton>
-              </Link>
             </div>
           ) : null}
           {error ? (

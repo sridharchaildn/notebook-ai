@@ -1,15 +1,69 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, type OpenDialogOptions } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  desktopCapturer,
+  dialog,
+  ipcMain,
+  safeStorage,
+  session,
+  shell,
+  type OpenDialogOptions,
+} from 'electron';
 import { ChildProcess, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CLOUD_API_URL =
+  process.env.NOTEBOOK_CLOUD_API_URL ??
+  process.env.VITE_CLOUD_API_URL ??
+  'http://127.0.0.1:8790';
+const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL ??
+  process.env.VITE_SUPABASE_URL ??
+  '';
+const SUPABASE_ANON_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ??
+  process.env.VITE_SUPABASE_ANON_KEY ??
+  '';
+const DESKTOP_AUTH_CALLBACK_URL =
+  import.meta.env.VITE_DESKTOP_AUTH_CALLBACK_URL ??
+  process.env.VITE_DESKTOP_AUTH_CALLBACK_URL ??
+  'notebook-ai://auth/callback';
+const DESKTOP_SUPABASE_STORAGE_KEY = 'notebook-ai-desktop-auth';
+const DESKTOP_PENDING_AUTH_KEY = 'notebook-ai-desktop-auth-pending';
+const RENDERER_AUTH_SESSION_KEY = 'notebook-desktop-renderer-session';
+const RENDERER_AUTH_SESSION_EVENT = 'notebook:main-auth-session';
+
+interface StoredSupabaseSession {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number | null;
+  tokenType: string | null;
+  userId: string;
+  userEmail: string | null;
+}
+
+interface PersistedAuthState {
+  session: StoredSupabaseSession | null;
+  authStorage: Record<string, string>;
+}
+
+interface DesktopRendererSession {
+  accessToken: string;
+  expiresAt: number | null;
+  userId: string;
+  userEmail: string | null;
+}
+
 let sidecarProcess: ChildProcess | null = null;
 let cloudApiProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
 const pendingDeepLinks: string[] = [];
+let cachedAuthState: PersistedAuthState | null = null;
 
 function isPortOpen(port: number, host = '127.0.0.1') {
   return new Promise<boolean>((resolve) => {
@@ -25,6 +79,419 @@ function isPortOpen(port: number, host = '127.0.0.1') {
   });
 }
 
+function authStatePath() {
+  return path.join(app.getPath('userData'), 'auth-state.bin');
+}
+
+function cloneAuthState(state: PersistedAuthState): PersistedAuthState {
+  return {
+    session: state.session ? { ...state.session } : null,
+    authStorage: { ...state.authStorage },
+  };
+}
+
+function readPersistedAuthState(): PersistedAuthState {
+  if (cachedAuthState) return cloneAuthState(cachedAuthState);
+
+  const fallback: PersistedAuthState = { session: null, authStorage: {} };
+  if (!safeStorage.isEncryptionAvailable()) {
+    cachedAuthState = fallback;
+    return cloneAuthState(fallback);
+  }
+
+  const filePath = authStatePath();
+  if (!fs.existsSync(filePath)) {
+    cachedAuthState = fallback;
+    return cloneAuthState(fallback);
+  }
+
+  try {
+    const encrypted = fs.readFileSync(filePath);
+    const decrypted = safeStorage.decryptString(encrypted);
+    const parsed = JSON.parse(decrypted) as PersistedAuthState;
+    cachedAuthState = {
+      session: parsed.session ? { ...parsed.session } : null,
+      authStorage:
+        parsed.authStorage && typeof parsed.authStorage === 'object'
+          ? Object.fromEntries(
+              Object.entries(parsed.authStorage).filter(
+                ([key, value]) => typeof key === 'string' && typeof value === 'string',
+              ),
+            )
+          : {},
+    };
+    return cloneAuthState(cachedAuthState);
+  } catch {
+    cachedAuthState = fallback;
+    return cloneAuthState(fallback);
+  }
+}
+
+function writePersistedAuthState(nextState: PersistedAuthState) {
+  cachedAuthState = cloneAuthState(nextState);
+  if (!safeStorage.isEncryptionAvailable()) {
+    return;
+  }
+
+  const filePath = authStatePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const encrypted = safeStorage.encryptString(JSON.stringify(nextState));
+  fs.writeFileSync(filePath, encrypted);
+}
+
+function normalizeStoredSession(payload: unknown): StoredSupabaseSession | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const raw = payload as Record<string, unknown>;
+  const accessToken = typeof raw.access_token === 'string' ? raw.access_token.trim() : '';
+  const refreshToken = typeof raw.refresh_token === 'string' ? raw.refresh_token.trim() : '';
+  const user =
+    raw.user && typeof raw.user === 'object' ? (raw.user as Record<string, unknown>) : null;
+  const userId = typeof user?.id === 'string' ? user.id.trim() : '';
+  const userEmail = typeof user?.email === 'string' ? user.email : null;
+  if (!accessToken || !refreshToken || !userId) return null;
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt: typeof raw.expires_at === 'number' ? raw.expires_at : null,
+    tokenType: typeof raw.token_type === 'string' ? raw.token_type : 'bearer',
+    userId,
+    userEmail,
+  };
+}
+
+function readCallbackValue(rawUrl: string, key: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    const direct = parsed.searchParams.get(key);
+    if (direct) return direct;
+    const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+    return hashParams.get(key);
+  } catch {
+    return null;
+  }
+}
+
+function decodeJwtExpiry(accessToken: string): number | null {
+  const segments = accessToken.split('.');
+  if (segments.length < 2 || !segments[1]) return null;
+  try {
+    const normalized = segments[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as { exp?: unknown };
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+function encodeBase64Url(buffer: Buffer): string {
+  return buffer
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function generatePkceVerifier(): string {
+  return encodeBase64Url(randomBytes(64));
+}
+
+function generatePkceChallenge(verifier: string): string {
+  return encodeBase64Url(createHash('sha256').update(verifier).digest());
+}
+
+function storePkceVerifier(verifier: string) {
+  const authState = readPersistedAuthState();
+  writePersistedAuthState({
+    ...authState,
+    authStorage: {
+      ...authState.authStorage,
+      [`${DESKTOP_SUPABASE_STORAGE_KEY}-code-verifier`]: verifier,
+    },
+  });
+}
+
+function buildSupabaseGoogleAuthorizeUrl(): string {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error('Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
+  }
+
+  const url = new URL(`${SUPABASE_URL}/auth/v1/authorize`);
+  url.searchParams.set('provider', 'google');
+  url.searchParams.set('redirect_to', DESKTOP_AUTH_CALLBACK_URL);
+  url.searchParams.set('prompt', 'select_account');
+  const authState = readPersistedAuthState();
+  writePersistedAuthState({
+    ...authState,
+    authStorage: {
+      ...authState.authStorage,
+      [DESKTOP_PENDING_AUTH_KEY]: '1',
+    },
+  });
+  return url.toString();
+}
+
+async function sendSupabaseMagicLink(email: string): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error('Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
+  }
+
+  const trimmed = email.trim();
+  if (!trimmed) {
+    throw new Error('Enter your email to receive a sign-in link.');
+  }
+
+  const url = new URL(`${SUPABASE_URL}/auth/v1/otp`);
+  url.searchParams.set('redirect_to', DESKTOP_AUTH_CALLBACK_URL);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json;charset=UTF-8',
+    },
+    body: JSON.stringify({
+      email: trimmed,
+      create_user: true,
+      data: {},
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(detail || 'Unable to send magic link.');
+  }
+
+  const authState = readPersistedAuthState();
+  writePersistedAuthState({
+    ...authState,
+    authStorage: {
+      ...authState.authStorage,
+      [DESKTOP_PENDING_AUTH_KEY]: '1',
+    },
+  });
+}
+
+async function fetchSupabaseUser(accessToken: string): Promise<{ id: string; email: string | null } | null> {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = (await response.json()) as { id?: unknown; email?: unknown };
+  if (typeof payload.id !== 'string' || payload.id.trim().length === 0) {
+    return null;
+  }
+  return {
+    id: payload.id,
+    email: typeof payload.email === 'string' ? payload.email : null,
+  };
+}
+
+function persistStoredSession(session: StoredSupabaseSession) {
+  const authState = readPersistedAuthState();
+  const nextStorage = { ...authState.authStorage };
+  delete nextStorage[`${DESKTOP_SUPABASE_STORAGE_KEY}-code-verifier`];
+  delete nextStorage[DESKTOP_PENDING_AUTH_KEY];
+  writePersistedAuthState({
+    session,
+    authStorage: nextStorage,
+  });
+}
+
+async function persistSessionFromTokens(
+  accessToken: string,
+  refreshToken: string,
+): Promise<StoredSupabaseSession | null> {
+  const user = await fetchSupabaseUser(accessToken);
+  if (!user) {
+    return null;
+  }
+
+  const session: StoredSupabaseSession = {
+    accessToken,
+    refreshToken,
+    expiresAt: decodeJwtExpiry(accessToken),
+    tokenType: 'bearer',
+    userId: user.id,
+    userEmail: user.email,
+  };
+  persistStoredSession(session);
+  return session;
+}
+
+async function exchangeSupabaseCodeInMain(authCode: string): Promise<StoredSupabaseSession | null> {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    process.stdout.write('[auth] Supabase env missing in main process; cannot exchange callback code\n');
+    return null;
+  }
+
+  const authState = readPersistedAuthState();
+  const rawStorageItem = authState.authStorage[`${DESKTOP_SUPABASE_STORAGE_KEY}-code-verifier`] ?? '';
+  const storageItem =
+    rawStorageItem.startsWith('"') && rawStorageItem.endsWith('"')
+      ? rawStorageItem.slice(1, -1)
+      : rawStorageItem;
+  const [codeVerifier] = storageItem.split('/');
+  if (!codeVerifier) {
+    process.stdout.write('[auth] Missing PKCE code verifier in secure desktop auth storage\n');
+    return null;
+  }
+
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=pkce`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      auth_code: authCode,
+      code_verifier: codeVerifier,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    process.stdout.write(`[auth] Supabase code exchange failed (${response.status}): ${detail}\n`);
+    return null;
+  }
+
+  const payload = (await response.json()) as {
+    access_token?: unknown;
+    refresh_token?: unknown;
+    expires_at?: unknown;
+    token_type?: unknown;
+    user?: { id?: unknown; email?: unknown } | null;
+  };
+  const session = normalizeStoredSession(payload);
+  if (!session) {
+    process.stdout.write('[auth] Supabase code exchange returned an invalid session payload\n');
+    return null;
+  }
+
+  persistStoredSession(session);
+  return session;
+}
+
+async function tryCompleteSupabaseCallbackInMain(rawUrl: string): Promise<StoredSupabaseSession | null> {
+  const errorDescription = readCallbackValue(rawUrl, 'error_description') ?? readCallbackValue(rawUrl, 'error');
+  if (errorDescription) {
+    process.stdout.write(`[auth] Callback returned error: ${decodeURIComponent(errorDescription)}\n`);
+    return null;
+  }
+
+  const code = readCallbackValue(rawUrl, 'code');
+  if (code) {
+    const session = await exchangeSupabaseCodeInMain(code);
+    if (session) {
+      process.stdout.write(`[auth] Session stored in main process for ${session.userId}\n`);
+      return session;
+    }
+    return null;
+  }
+
+  const accessToken = readCallbackValue(rawUrl, 'access_token');
+  const refreshToken = readCallbackValue(rawUrl, 'refresh_token');
+  if (accessToken && refreshToken) {
+    const session = await persistSessionFromTokens(accessToken, refreshToken);
+    if (session) {
+      process.stdout.write(`[auth] Token session stored in main process for ${session.userId}\n`);
+      return session;
+    }
+  }
+
+  return null;
+}
+
+function toRendererSession(session: StoredSupabaseSession | null): DesktopRendererSession | null {
+  if (!session) return null;
+  return {
+    accessToken: session.accessToken,
+    expiresAt: session.expiresAt,
+    userId: session.userId,
+    userEmail: session.userEmail,
+  };
+}
+
+function syncSessionIntoRenderer(rendererSession: DesktopRendererSession | null) {
+  if (!mainWindow) return;
+  const sessionJson = JSON.stringify(rendererSession);
+  const storageKeyJson = JSON.stringify(RENDERER_AUTH_SESSION_KEY);
+  const eventNameJson = JSON.stringify(RENDERER_AUTH_SESSION_EVENT);
+  const script = `(() => {
+    const session = ${sessionJson};
+    const storageKey = ${storageKeyJson};
+    const eventName = ${eventNameJson};
+    try {
+      if (session) {
+        window.localStorage.setItem(storageKey, JSON.stringify(session));
+      } else {
+        window.localStorage.removeItem(storageKey);
+      }
+      window.dispatchEvent(new CustomEvent(eventName, { detail: session }));
+    } catch {
+      /* ignore renderer sync errors */
+    }
+  })();`;
+  void mainWindow.webContents.executeJavaScript(script).catch(() => {
+    /* ignore renderer sync errors */
+  });
+}
+
+function shouldRefreshSession(session: StoredSupabaseSession): boolean {
+  if (!session.expiresAt) return false;
+  return session.expiresAt * 1000 - Date.now() < 60_000;
+}
+
+async function refreshStoredSession(
+  sessionToRefresh: StoredSupabaseSession,
+): Promise<StoredSupabaseSession | null> {
+  const response = await fetch(`${CLOUD_API_URL}/auth/session/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: sessionToRefresh.refreshToken }),
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = (await response.json()) as { session?: unknown };
+  return normalizeStoredSession(payload.session ?? null);
+}
+
+async function getStoredSessionForRenderer(): Promise<DesktopRendererSession | null> {
+  const authState = readPersistedAuthState();
+  if (!authState.session) {
+    process.stdout.write('[auth] get-session -> none\n');
+    return null;
+  }
+
+  if (!shouldRefreshSession(authState.session)) {
+    const session = toRendererSession(authState.session);
+    process.stdout.write(`[auth] get-session -> ${session?.userId ?? 'none'}\n`);
+    return session;
+  }
+
+  const refreshed = await refreshStoredSession(authState.session);
+  if (!refreshed) {
+    writePersistedAuthState({ ...authState, session: null });
+    process.stdout.write('[auth] get-session -> refresh failed\n');
+    return null;
+  }
+
+  writePersistedAuthState({ ...authState, session: refreshed });
+  const session = toRendererSession(refreshed);
+  process.stdout.write(`[auth] get-session -> refreshed ${session?.userId ?? 'none'}\n`);
+  return session;
+}
+
 async function startSidecar() {
   if (sidecarProcess) return;
   if (await isPortOpen(8787)) {
@@ -38,8 +505,7 @@ async function startSidecar() {
   const defaultSidecarCommand = fs.existsSync(sidecarVenvPython)
     ? `${sidecarVenvPython} -m uvicorn app.main:app --host 127.0.0.1 --port 8787`
     : 'python3.11 -m uvicorn app.main:app --host 127.0.0.1 --port 8787';
-  const sidecarCommand =
-    process.env.NOTEBOOK_LOCAL_SIDECAR_CMD ?? defaultSidecarCommand;
+  const sidecarCommand = process.env.NOTEBOOK_LOCAL_SIDECAR_CMD ?? defaultSidecarCommand;
 
   sidecarProcess = spawn(sidecarCommand, {
     cwd: sidecarCwd,
@@ -133,6 +599,9 @@ function createWindow() {
   }
 
   window.webContents.on('did-finish-load', () => {
+    void getStoredSessionForRenderer().then((session) => {
+      syncSessionIntoRenderer(session);
+    });
     flushPendingDeepLinks();
   });
 
@@ -156,15 +625,35 @@ function createWindow() {
 function handleAuthCallbackUrl(rawUrl: string) {
   if (!rawUrl.startsWith('notebook-ai://')) return;
   process.stdout.write(`[auth] Received deep link: ${rawUrl}\n`);
-  pendingDeepLinks.push(rawUrl);
-  if (pendingDeepLinks.length > 12) {
-    pendingDeepLinks.shift();
-  }
-  if (mainWindow) {
-    mainWindow.webContents.send('auth:callback-url', rawUrl);
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  }
+  void (async () => {
+    const session = await tryCompleteSupabaseCallbackInMain(rawUrl);
+    if (session) {
+      pendingDeepLinks.push(rawUrl);
+      if (pendingDeepLinks.length > 12) {
+        pendingDeepLinks.shift();
+      }
+      focusOrCreateMainWindow();
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.focus();
+        const rendererSession = toRendererSession(session);
+        mainWindow.webContents.send('auth:session-updated', rendererSession);
+        mainWindow.webContents.send('auth:callback-url', rawUrl);
+        syncSessionIntoRenderer(rendererSession);
+      }
+      return;
+    }
+
+    pendingDeepLinks.push(rawUrl);
+    if (pendingDeepLinks.length > 12) {
+      pendingDeepLinks.shift();
+    }
+    if (mainWindow) {
+      mainWindow.webContents.send('auth:callback-url', rawUrl);
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  })();
 }
 
 function focusOrCreateMainWindow() {
@@ -284,6 +773,70 @@ app.whenReady().then(async () => {
     pendingDeepLinks.length = 0;
     process.stdout.write(`[auth] Renderer consumed deep link: ${latest ?? 'none'}\n`);
     return latest;
+  });
+
+  ipcMain.handle('auth:get-session', async () => getStoredSessionForRenderer());
+
+  ipcMain.handle('auth:save-session', async (_event, payload: unknown) => {
+    const sessionToPersist = normalizeStoredSession(payload);
+    if (!sessionToPersist) {
+      throw new Error('Invalid desktop auth session payload');
+    }
+    const authState = readPersistedAuthState();
+    writePersistedAuthState({
+      ...authState,
+      session: sessionToPersist,
+    });
+    const rendererSession = toRendererSession(sessionToPersist);
+    syncSessionIntoRenderer(rendererSession);
+    return rendererSession;
+  });
+
+  ipcMain.handle('auth:clear-session', async () => {
+    const authState = readPersistedAuthState();
+    writePersistedAuthState({ ...authState, session: null, authStorage: {} });
+    syncSessionIntoRenderer(null);
+    return null;
+  });
+
+  ipcMain.handle('auth:get-storage-item', async (_event, key: string) => {
+    const authState = readPersistedAuthState();
+    return authState.authStorage[key] ?? null;
+  });
+
+  ipcMain.handle('auth:set-storage-item', async (_event, key: string, value: string) => {
+    const authState = readPersistedAuthState();
+    writePersistedAuthState({
+      ...authState,
+      authStorage: {
+        ...authState.authStorage,
+        [key]: value,
+      },
+    });
+    return value;
+  });
+
+  ipcMain.handle('auth:remove-storage-item', async (_event, key: string) => {
+    const authState = readPersistedAuthState();
+    if (!(key in authState.authStorage)) {
+      return null;
+    }
+    const nextStorage = { ...authState.authStorage };
+    delete nextStorage[key];
+    writePersistedAuthState({ ...authState, authStorage: nextStorage });
+    return null;
+  });
+
+  ipcMain.handle('auth:start-google-sign-in', async () => {
+    const url = buildSupabaseGoogleAuthorizeUrl();
+    process.stdout.write('[auth] Prepared Google sign-in in main process\n');
+    return url;
+  });
+
+  ipcMain.handle('auth:send-magic-link', async (_event, email: string) => {
+    await sendSupabaseMagicLink(email);
+    process.stdout.write('[auth] Prepared magic-link sign-in in main process\n');
+    return null;
   });
 
   createWindow();

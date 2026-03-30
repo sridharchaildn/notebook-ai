@@ -29,29 +29,18 @@ function GoogleIcon() {
 
 export default function SignInPage() {
   const router = useRouter();
-  const [desktopState, setDesktopState] = useState<string | null>(null);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [hasExistingSession, setHasExistingSession] = useState(false);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const nextDesktopState = params.get('state');
-    setDesktopState(nextDesktopState);
-
     if (!isSupabaseConfigured()) return;
     const supabase = getSupabaseClient();
     void supabase.auth.getUser().then(({ data }) => {
       if (!data.user) return;
       setHasExistingSession(true);
       setBusy(true);
-      if (nextDesktopState) {
-        setMessage('Existing session found. Returning to desktop...');
-        const next = new URLSearchParams({ intent: 'signin', state: nextDesktopState });
-        window.location.replace(`/auth/callback?${next.toString()}`);
-        return;
-      }
       setMessage('Already signed in. Redirecting...');
       router.replace('/home');
     });
@@ -67,7 +56,7 @@ export default function SignInPage() {
     setMessage('');
     try {
       const supabase = getSupabaseClient();
-      const redirectTo = buildAuthCallbackUrl('signin', desktopState);
+      const redirectTo = buildAuthCallbackUrl('signin');
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -97,7 +86,7 @@ export default function SignInPage() {
     setMessage('');
     try {
       const supabase = getSupabaseClient();
-      const redirectTo = buildAuthCallbackUrl('signin', desktopState);
+      const redirectTo = buildAuthCallbackUrl('signin');
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
         options: {
@@ -114,10 +103,7 @@ export default function SignInPage() {
   }
 
   function handleUseCurrentSession() {
-    const next = new URLSearchParams();
-    next.set('intent', 'signin');
-    if (desktopState) next.set('state', desktopState);
-    window.location.href = `/auth/callback?${next.toString()}`;
+    window.location.href = '/auth/callback?intent=signin';
   }
 
   return (
@@ -136,7 +122,7 @@ export default function SignInPage() {
             Sign in
           </h1>
           <p className="muted" style={{ margin: '0 0 24px', fontSize: '0.88rem', lineHeight: 1.6 }}>
-            Sign in to continue to Notebook AI{desktopState ? ' desktop' : ''}.
+            Sign in to continue to Notebook AI.
           </p>
 
           <div className="form-stack">
@@ -181,7 +167,7 @@ export default function SignInPage() {
               <Link href="/" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.84rem', color: 'var(--text-secondary)' }}>
                 <ArrowLeftIcon /> Back to landing
               </Link>
-              <Link href={desktopState ? `/auth/signup?state=${encodeURIComponent(desktopState)}` : '/auth/signup'} style={{ fontSize: '0.84rem', textDecoration: 'underline', color: 'var(--text-secondary)' }}>
+              <Link href="/auth/signup" style={{ fontSize: '0.84rem', textDecoration: 'underline', color: 'var(--text-secondary)' }}>
                 Need an account? Sign up
               </Link>
             </div>

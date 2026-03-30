@@ -8,56 +8,44 @@ from pydantic import BaseModel, Field
 ProviderId = Literal["openai", "openrouter"]
 StorageMode = Literal["local", "local_and_drive"]
 LegalDocumentType = Literal["privacy_policy", "user_agreement"]
+WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
 
 
-class AuthSessionExchangeRequest(BaseModel):
-    access_token: str | None = None
+class AuthenticatedUser(BaseModel):
+    id: str
+    email: str | None = None
 
 
-class AuthSessionExchangeResponse(BaseModel):
-    user_id: str
-    session_token: str
-    expires_in_seconds: int
+class SupabaseSessionPayload(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_at: int | None = None
+    expires_in: int | None = None
+    token_type: str | None = "bearer"
+    user: AuthenticatedUser
 
 
-class DesktopAuthExchangeInitRequest(BaseModel):
-    device_label: str | None = None
+class AuthRefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=4)
 
 
-class DesktopAuthExchangeInitResponse(BaseModel):
+class AuthRefreshResponse(BaseModel):
+    session: SupabaseSessionPayload
+
+
+class AuthLogoutResponse(BaseModel):
+    ok: bool = True
+
+
+class OAuthStartResponse(BaseModel):
+    url: str
     state: str
-    auth_url: str
-    expires_in_seconds: int
-
-
-class DesktopAuthExchangeCompleteRequest(BaseModel):
-    state: str | None = None
-    user_id: str | None = None
-    code: str | None = None
-
-
-class DesktopAuthExchangeCompleteResponse(BaseModel):
-  deep_link_url: str | None = None
-  code: str | None = None
-  session_token: str | None = None
-  user_id: str | None = None
-  expires_in_seconds: int | None = None
-  onboarding_complete: bool | None = None
-
-
-class DesktopAuthExchangePollResponse(BaseModel):
-    ready: bool = False
-    session_token: str | None = None
-    user_id: str | None = None
-    expires_in_seconds: int | None = None
-    onboarding_complete: bool | None = None
+    expires_in_seconds: int = 900
 
 
 class ProviderByokRequest(BaseModel):
     provider: ProviderId
     api_key: str = Field(min_length=4)
-    session_token: str | None = None
-    user_id: str | None = None
 
 
 class ProviderStatus(BaseModel):
@@ -95,8 +83,6 @@ class LegalAcceptanceInput(BaseModel):
 
 
 class LegalAcceptRequest(BaseModel):
-    session_token: str | None = None
-    user_id: str | None = None
     acceptances: list[LegalAcceptanceInput] = Field(default_factory=list)
 
 
@@ -115,8 +101,16 @@ class StoragePreference(BaseModel):
 class StoragePreferenceRequest(BaseModel):
     mode: StorageMode = "local"
     local_root: str | None = None
-    session_token: str | None = None
-    user_id: str | None = None
+
+
+class WorkspaceDescriptor(BaseModel):
+    id: str
+    name: str
+    kind: WorkspaceKind
+    storage_mode: StorageMode
+    drive_folder_id: str | None = None
+    local_root: str | None = None
+    updated_at: datetime | None = None
 
 
 class DriveConnectionStatus(BaseModel):
@@ -129,10 +123,15 @@ class DriveConnectionStatus(BaseModel):
 class GoogleDriveTokenResponse(BaseModel):
     access_token: str
     token_type: str = "Bearer"
+    folder_id: str | None = None
+    folder_name: str | None = None
+
+
+class GoogleDriveFolderUpdateRequest(BaseModel):
+    folder_id: str = Field(min_length=3)
+    folder_name: str | None = None
 
 
 class GoogleDriveByokRequest(BaseModel):
     refresh_token: str = Field(min_length=4)
     folder_id: str | None = None
-    session_token: str | None = None
-    user_id: str | None = None

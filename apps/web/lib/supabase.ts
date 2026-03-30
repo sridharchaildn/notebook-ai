@@ -29,11 +29,8 @@ export function getSupabaseClient(): SupabaseClient {
   return supabaseClient;
 }
 
-export function buildAuthCallbackUrl(intent: 'signin' | 'signup', desktopState?: string | null): string {
+export function buildAuthCallbackUrl(intent: 'signin' | 'signup'): string {
   const url = new URL('/auth/callback', window.location.origin);
   url.searchParams.set('intent', intent);
-  if (desktopState) {
-    url.searchParams.set('state', desktopState);
-  }
   return url.toString();
 }

@@ -1,6 +1,6 @@
 # Notebook AI
 
-Desktop-first AI note taker with local markdown storage, Electron UX, a new Next.js web app, and FastAPI/LangChain backends.
+Desktop-first AI note taker with a local-first Electron UX, a Next.js web app, and FastAPI/LangChain backends.
 
 ## Architecture
 
@@ -26,10 +26,8 @@ flowchart TB
   end
   subgraph network["Network"]
     Cloud["Cloud API<br/>FastAPI"]
-    Vault[("Credential vault<br/>SQLite")]
     Supabase["Supabase"]
     Providers["Provider APIs<br/>OpenAI · OpenRouter · …"]
-    Cloud --- Vault
     Cloud --> Supabase
   end
   Web -->|"signup · legal accept · onboarding"| Cloud
@@ -45,7 +43,7 @@ A **sidecar** here is a small **local HTTP service** you run next to the desktop
 - **Notes:** Create, list, and save markdown through the sidecar so content stays on your filesystem and the UI does not depend on a remote service for every edit.
 - **AI and transcription:** Streaming transforms and audio round-trips go to the sidecar on `localhost`, which talks to provider APIs using keys from your env or from the cloud vault—so you get responsive streaming without routing note bodies or every model call through hosted infrastructure.
 
-The **cloud API** is a separate companion: session exchange, legal acceptance, provider OAuth/BYOK, storage preferences, desktop auth handoff, and Drive integration metadata. It does **not** store your note markdown or sit in the path for debounced note persistence.
+The **cloud API** is a separate companion: Supabase auth validation, session refresh/logout, legal acceptance, provider OAuth/BYOK, storage preferences, desktop auth handoff, and Drive integration metadata. It does **not** store your note markdown or sit in the path for debounced note persistence.
 
 ## UX Highlights
 
@@ -61,14 +59,18 @@ The **cloud API** is a separate companion: session exchange, legal acceptance, p
 2. Create Python envs for each service and install dependencies:
    - `cd services/local-sidecar && python3.11 -m venv .venv && source .venv/bin/activate && pip install -e .'[dev]'`
    - `cd services/cloud-api && python3.11 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]'`
-3. Run services:
-   - Local sidecar (recommended for live interviews): `uvicorn app.main:app --port 8787`
-   - Cloud API: `uvicorn app.main:app --port 8790`
-   - Dev-only hot reload variants: add `--reload` when you are not running long live capture sessions.
+3. Run services (requires a `.venv` in each service from step 2 so npm uses **Python ≥3.11**, not the system `python3`—e.g. Xcode’s 3.9 will fail on type hints):
+   - From repo root: `npm run dev:sidecar` (8787) and `npm run dev:cloud` (8790) in separate terminals, or `npm run dev:services` for both with reload. Scripts call `services/*/ .venv/bin/python` (macOS/Linux).
+   - **Windows:** from each service directory run `.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8787` (or `8790` for cloud-api).
+   - Or activate a venv and run `uvicorn app.main:app --reload --port 8787` / `--port 8790` (omit `--reload` during long live capture if you prefer).
 4. Run web app:
    - `npm run dev:web`
 5. Run desktop app:
    - `npm run dev:desktop`
+
+## Setup Guides
+
+- [Supabase, Google Sign-In, and Google Drive Setup](./docs/supabase-google-setup.md)
 
 ## Environment
 
@@ -100,19 +102,20 @@ See `.env.example` in:
   - `GET /providers/status`
   - `POST /providers/status/cache`
 - Cloud API:
-  - `POST /auth/session/exchange`
-  - `POST /auth/desktop/exchange/init`
-  - `POST /auth/desktop/exchange/complete`
+  - `POST /auth/session/refresh`
+  - `POST /auth/logout`
   - `GET /legal/current`
   - `POST /legal/accept`
+  - `GET /legal/accept`
   - `GET /settings/storage`
   - `PUT /settings/storage`
-  - `GET /providers/openai/oauth/start`
+  - `POST /providers/openai/oauth/start`
   - `GET /providers/openai/oauth/callback`
-  - `GET /integrations/google-drive/oauth/start`
+  - `POST /integrations/google-drive/oauth/start`
   - `GET /integrations/google-drive/oauth/callback`
   - `GET /integrations/google-drive/status`
   - `POST /integrations/google-drive/access-token`
   - `POST /providers/byok`
+  - `GET /providers/status`
   - `GET /providers/credential`
   - `DELETE /providers/{provider}`

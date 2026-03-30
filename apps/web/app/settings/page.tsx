@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UICard, UIButton, UIInput } from '@notebook-ai/ui';
-import { saveProviderByok, saveStoragePreference } from '../../lib/cloud';
+import { getCurrentSupabaseUser, saveProviderByok, saveStoragePreference } from '../../lib/cloud';
 import { getSupabaseClient, isSupabaseConfigured } from '../../lib/supabase';
 import { ThemeToggle } from '../components/ThemeToggle';
 
@@ -43,21 +43,22 @@ export default function SettingsPage() {
   const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
-    setUserId(localStorage.getItem('notebook_web_user_id') || '');
+    void getCurrentSupabaseUser()
+      .then((user) => setUserId(user.id))
+      .catch(() => setUserId(''));
   }, []);
 
   async function handleSave() {
     if (!userId) {
-      setStatus('Set a user id first.');
+      setStatus('Sign in again to update settings.');
       return;
     }
     setSaving(true);
     setStatus('');
     try {
-      if (openaiKey.trim()) await saveProviderByok(userId, 'openai', openaiKey.trim());
-      if (openrouterKey.trim()) await saveProviderByok(userId, 'openrouter', openrouterKey.trim());
-      await saveStoragePreference(userId, mode);
-      localStorage.setItem('notebook_web_user_id', userId);
+      if (openaiKey.trim()) await saveProviderByok('openai', openaiKey.trim());
+      if (openrouterKey.trim()) await saveProviderByok('openrouter', openrouterKey.trim());
+      await saveStoragePreference(mode);
       setStatus('saved');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Failed to save settings.');
@@ -72,11 +73,9 @@ export default function SettingsPage() {
     try {
       if (isSupabaseConfigured()) {
         const supabase = getSupabaseClient();
-        const { error } = await supabase.auth.signOut();
+        const { error } = await supabase.auth.signOut({ scope: 'local' });
         if (error) throw error;
       }
-      localStorage.removeItem('notebook_web_user_id');
-      localStorage.removeItem('notebook_web_user_email');
       router.replace('/auth/signin');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Failed to sign out.');
@@ -116,7 +115,7 @@ export default function SettingsPage() {
           <div className="form-stack" style={{ marginBottom: 28 }}>
             <label>
               User ID
-              <UIInput value={userId} onChange={setUserId} placeholder="user id" />
+              <UIInput value={userId} onChange={setUserId} placeholder="user id" disabled />
             </label>
           </div>
 

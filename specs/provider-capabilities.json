@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "provider": "openai",
+      "supports_streaming": true,
+      "supports_transcription": true,
+      "supports_oauth": true,
+      "supports_api_key": true,
+      "preferred_for": ["notes", "interview", "transcription"]
+    },
+    {
+      "provider": "openrouter",
+      "supports_streaming": true,
+      "supports_transcription": false,
+      "supports_oauth": false,
+      "supports_api_key": true,
+      "preferred_for": ["notes", "interview"]
+    }
+  ]
+}

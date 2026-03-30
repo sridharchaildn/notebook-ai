@@ -1,11 +1,28 @@
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
+import httpx
+
+from .config import Settings
 from .models import LegalAcceptanceRecord, ProviderStatus, StoragePreference
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _parse_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -17,345 +34,176 @@ class CredentialRecord:
     updated_at: str
 
 
-@dataclass
-class DesktopAuthCodeRecord:
-    code: str
-    user_id: str
-    onboarding_complete: bool
+class CloudStore:
+    async def upsert_credential(
+        self,
+        user_id: str,
+        provider: str,
+        encrypted_value: str,
+        connection_type: str,
+    ) -> None:
+        raise NotImplementedError
+
+    async def delete_credential(self, user_id: str, provider: str) -> None:
+        raise NotImplementedError
+
+    async def list_statuses(self, user_id: str) -> list[ProviderStatus]:
+        raise NotImplementedError
+
+    async def get_credential(self, user_id: str, provider: str) -> CredentialRecord | None:
+        raise NotImplementedError
+
+    async def save_oauth_state(self, state: str, user_id: str) -> None:
+        raise NotImplementedError
+
+    async def consume_oauth_state(self, state: str) -> str | None:
+        raise NotImplementedError
+
+    async def upsert_storage_preference(
+        self,
+        user_id: str,
+        mode: str,
+        local_root: str | None,
+    ) -> StoragePreference:
+        raise NotImplementedError
+
+    async def get_storage_preference(self, user_id: str) -> StoragePreference:
+        raise NotImplementedError
+
+    async def save_legal_acceptances(
+        self,
+        user_id: str,
+        acceptances: list[tuple[str, str]],
+    ) -> list[LegalAcceptanceRecord]:
+        raise NotImplementedError
+
+    async def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
+        raise NotImplementedError
 
 
-class CredentialVault:
-    def __init__(self, database_path: Path):
-        self.database_path = database_path
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+class SupabaseStore(CloudStore):
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+        if not settings.supabase_server_key:
+            raise RuntimeError("Supabase secret key is required for cloud storage")
+        self.settings = settings
+        self.transport = transport
+        self.rest_url = f"{settings.supabase_url.rstrip('/')}/rest/v1"
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        return connection
+    def _headers(self, prefer: str | None = None) -> dict[str, str]:
+        headers = {
+            "apikey": self.settings.supabase_server_key,
+        }
+        if prefer:
+            headers["Prefer"] = prefer
+        return headers
 
-    def _initialize(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS credentials (
-                  user_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  encrypted_value TEXT NOT NULL,
-                  connection_type TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  PRIMARY KEY (user_id, provider)
-                )
-                """
+    async def _request(
+        self,
+        method: str,
+        table: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: object | None = None,
+        prefer: str | None = None,
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=10.0, transport=self.transport) as client:
+            response = await client.request(
+                method,
+                f"{self.rest_url}/{table}",
+                params=params,
+                json=json_body,
+                headers=self._headers(prefer),
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS oauth_states (
-                  state TEXT PRIMARY KEY,
-                  user_id TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS desktop_auth_states (
-                  state TEXT PRIMARY KEY,
-                  user_id TEXT,
-                  device_label TEXT,
-                  created_at TEXT NOT NULL,
-                  expires_at TEXT NOT NULL,
-                  consumed_at TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS desktop_auth_codes (
-                  code TEXT PRIMARY KEY,
-                  user_id TEXT NOT NULL,
-                  onboarding_complete INTEGER NOT NULL,
-                  created_at TEXT NOT NULL,
-                  expires_at TEXT NOT NULL,
-                  consumed_at TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS legal_acceptances (
-                  user_id TEXT NOT NULL,
-                  doc_type TEXT NOT NULL,
-                  version TEXT NOT NULL,
-                  accepted_at TEXT NOT NULL,
-                  PRIMARY KEY (user_id, doc_type, version)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_storage_preferences (
-                  user_id TEXT PRIMARY KEY,
-                  mode TEXT NOT NULL,
-                  local_root TEXT,
-                  updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.commit()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise RuntimeError(
+                    "Supabase REST rejected NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY. "
+                    "Create or copy a valid server-side secret key from Supabase Settings -> API Keys, "
+                    "update services/cloud-api/.env, then restart services/cloud-api."
+                ) from exc
+            raise
+        return response
 
-    def upsert_credential(self, user_id: str, provider: str, encrypted_value: str, connection_type: str) -> None:
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO credentials (user_id, provider, encrypted_value, connection_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, provider) DO UPDATE SET
-                  encrypted_value = excluded.encrypted_value,
-                  connection_type = excluded.connection_type,
-                  updated_at = excluded.updated_at
-                """,
-                (user_id, provider, encrypted_value, connection_type, now, now),
-            )
-            conn.commit()
+    async def _select_rows(self, table: str, *, params: dict[str, str]) -> list[dict]:
+        response = await self._request("GET", table, params=params)
+        payload = response.json()
+        if not isinstance(payload, list):
+            return []
+        return [row for row in payload if isinstance(row, dict)]
 
-    def delete_credential(self, user_id: str, provider: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM credentials WHERE user_id = ? AND provider = ?",
-                (user_id, provider),
-            )
-            conn.commit()
+    async def upsert_credential(
+        self,
+        user_id: str,
+        provider: str,
+        encrypted_value: str,
+        connection_type: str,
+    ) -> None:
+        now = _utcnow().isoformat()
+        await self._request(
+            "POST",
+            "provider_credentials",
+            json_body={
+                "user_id": user_id,
+                "provider": provider,
+                "encrypted_value": encrypted_value,
+                "connection_type": connection_type,
+                "created_at": now,
+                "updated_at": now,
+            },
+            prefer="resolution=merge-duplicates,return=representation",
+        )
 
-    def list_statuses(self, user_id: str) -> list[ProviderStatus]:
-        provider_rows: dict[str, sqlite3.Row] = {}
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT provider, connection_type, updated_at FROM credentials WHERE user_id = ?",
-                (user_id,),
-            ).fetchall()
-            for row in rows:
-                provider_rows[str(row["provider"])] = row
+    async def delete_credential(self, user_id: str, provider: str) -> None:
+        await self._request(
+            "DELETE",
+            "provider_credentials",
+            params={"user_id": f"eq.{user_id}", "provider": f"eq.{provider}"},
+        )
 
+    async def list_statuses(self, user_id: str) -> list[ProviderStatus]:
+        rows = await self._select_rows(
+            "provider_credentials",
+            params={
+                "user_id": f"eq.{user_id}",
+                "select": "provider,connection_type,updated_at",
+            },
+        )
+        provider_rows = {str(row["provider"]): row for row in rows if row.get("provider")}
         statuses: list[ProviderStatus] = []
         for provider in ("openai", "openrouter"):
             row = provider_rows.get(provider)
             if not row:
                 statuses.append(
-                    ProviderStatus(
-                        provider=provider,
-                        connected=False,
-                        via="none",
-                        last_updated_at=None,
-                    )
+                    ProviderStatus(provider=provider, connected=False, via="none", last_updated_at=None)
                 )
                 continue
 
-            connection_type = str(row["connection_type"])
+            connection_type = str(row.get("connection_type") or "none")
             statuses.append(
                 ProviderStatus(
                     provider=provider,
                     connected=True,
                     via=connection_type if connection_type in {"oauth", "api_key"} else "none",
-                    last_updated_at=datetime.fromisoformat(str(row["updated_at"])),
+                    last_updated_at=_parse_datetime(str(row.get("updated_at") or "")),
                 )
             )
-
         return statuses
 
-    def save_oauth_state(self, state: str, user_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO oauth_states (state, user_id, created_at) VALUES (?, ?, ?)",
-                (state, user_id, datetime.now(UTC).isoformat()),
-            )
-            conn.commit()
-
-    def consume_oauth_state(self, state: str) -> str | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT user_id FROM oauth_states WHERE state = ?",
-                (state,),
-            ).fetchone()
-            conn.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
-            conn.commit()
-
-        if not row:
-            return None
-        return str(row["user_id"])
-
-    def create_desktop_auth_state(self, state: str, device_label: str | None) -> None:
-        now = datetime.now(UTC)
-        expires = now + timedelta(minutes=15)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO desktop_auth_states (state, user_id, device_label, created_at, expires_at, consumed_at)
-                VALUES (?, NULL, ?, ?, ?, NULL)
-                """,
-                (state, device_label, now.isoformat(), expires.isoformat()),
-            )
-            conn.commit()
-
-    def issue_desktop_auth_code(self, state: str, user_id: str, onboarding_complete: bool = True) -> str | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT state, expires_at, consumed_at FROM desktop_auth_states WHERE state = ?",
-                (state,),
-            ).fetchone()
-            if not row:
-                return None
-
-            expires_at = _parse_datetime(str(row["expires_at"]))
-            consumed_at = str(row["consumed_at"]) if row["consumed_at"] else None
-            if consumed_at or not expires_at or expires_at <= datetime.now(UTC):
-                return None
-
-            code = _random_token(32)
-            now = datetime.now(UTC)
-            code_expires = now + timedelta(minutes=10)
-            conn.execute(
-                """
-                INSERT INTO desktop_auth_codes (code, user_id, onboarding_complete, created_at, expires_at, consumed_at)
-                VALUES (?, ?, ?, ?, ?, NULL)
-                """,
-                (code, user_id, 1 if onboarding_complete else 0, now.isoformat(), code_expires.isoformat()),
-            )
-            conn.execute(
-                "UPDATE desktop_auth_states SET user_id = ?, consumed_at = ? WHERE state = ?",
-                (user_id, now.isoformat(), state),
-            )
-            conn.commit()
-            return code
-
-    def consume_desktop_auth_code(self, code: str) -> DesktopAuthCodeRecord | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT code, user_id, onboarding_complete, expires_at, consumed_at FROM desktop_auth_codes WHERE code = ?",
-                (code,),
-            ).fetchone()
-            if not row:
-                return None
-
-            expires_at = _parse_datetime(str(row["expires_at"]))
-            consumed_at = str(row["consumed_at"]) if row["consumed_at"] else None
-            if consumed_at or not expires_at or expires_at <= datetime.now(UTC):
-                return None
-
-            now = datetime.now(UTC).isoformat()
-            conn.execute(
-                "UPDATE desktop_auth_codes SET consumed_at = ? WHERE code = ?",
-                (now, code),
-            )
-            conn.commit()
-
-            return DesktopAuthCodeRecord(
-                code=str(row["code"]),
-                user_id=str(row["user_id"]),
-                onboarding_complete=bool(row["onboarding_complete"]),
-            )
-
-    def get_desktop_auth_state(self, state: str) -> DesktopAuthCodeRecord | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT state, user_id, expires_at, consumed_at FROM desktop_auth_states WHERE state = ?",
-                (state,),
-            ).fetchone()
-            if not row:
-                return None
-
-            user_id = str(row["user_id"]) if row["user_id"] else None
-            consumed_at = str(row["consumed_at"]) if row["consumed_at"] else None
-            expires_at = _parse_datetime(str(row["expires_at"]))
-            if not user_id or not consumed_at or not expires_at or expires_at <= datetime.now(UTC):
-                return None
-
-            return DesktopAuthCodeRecord(
-                code="",
-                user_id=user_id,
-                onboarding_complete=True,
-            )
-
-    def upsert_storage_preference(self, user_id: str, mode: str, local_root: str | None) -> StoragePreference:
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO user_storage_preferences (user_id, mode, local_root, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                  mode = excluded.mode,
-                  local_root = excluded.local_root,
-                  updated_at = excluded.updated_at
-                """,
-                (user_id, mode, local_root, now),
-            )
-            conn.commit()
-        return self.get_storage_preference(user_id)
-
-    def get_storage_preference(self, user_id: str) -> StoragePreference:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT mode, local_root, updated_at FROM user_storage_preferences WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-        if not row:
-            return StoragePreference(mode="local", local_root=None, updated_at=None)
-
-        return StoragePreference(
-            mode=str(row["mode"]),
-            local_root=str(row["local_root"]) if row["local_root"] else None,
-            updated_at=_parse_datetime(str(row["updated_at"])),
+    async def get_credential(self, user_id: str, provider: str) -> CredentialRecord | None:
+        rows = await self._select_rows(
+            "provider_credentials",
+            params={
+                "user_id": f"eq.{user_id}",
+                "provider": f"eq.{provider}",
+                "select": "user_id,provider,encrypted_value,connection_type,updated_at",
+                "limit": "1",
+            },
         )
-
-    def save_legal_acceptances(self, user_id: str, acceptances: list[tuple[str, str]]) -> list[LegalAcceptanceRecord]:
-        accepted_at = datetime.now(UTC).isoformat()
-        with self._connect() as conn:
-            for doc_type, version in acceptances:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO legal_acceptances (user_id, doc_type, version, accepted_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (user_id, doc_type, version, accepted_at),
-                )
-            conn.commit()
-        return self.list_legal_acceptances(user_id)
-
-    def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT doc_type, version, accepted_at
-                FROM legal_acceptances
-                WHERE user_id = ?
-                ORDER BY accepted_at DESC
-                """,
-                (user_id,),
-            ).fetchall()
-
-        return [
-            LegalAcceptanceRecord(
-                type=str(row["doc_type"]),
-                version=str(row["version"]),
-                accepted_at=_parse_datetime(str(row["accepted_at"])) or datetime.now(UTC),
-            )
-            for row in rows
-        ]
-
-    def get_credential(self, user_id: str, provider: str) -> CredentialRecord | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT user_id, provider, encrypted_value, connection_type, updated_at FROM credentials WHERE user_id = ? AND provider = ?",
-                (user_id, provider),
-            ).fetchone()
-
-        if not row:
+        if not rows:
             return None
-
+        row = rows[0]
         return CredentialRecord(
             user_id=str(row["user_id"]),
             provider=str(row["provider"]),
@@ -364,18 +212,193 @@ class CredentialVault:
             updated_at=str(row["updated_at"]),
         )
 
+    async def save_oauth_state(self, state: str, user_id: str) -> None:
+        await self._request(
+            "POST",
+            "oauth_states",
+            json_body={
+                "state": state,
+                "user_id": user_id,
+                "created_at": _utcnow().isoformat(),
+            },
+            prefer="resolution=merge-duplicates,return=representation",
+        )
 
-def _parse_datetime(raw: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(raw)
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=UTC)
-        return parsed
-    except ValueError:
-        return None
+    async def consume_oauth_state(self, state: str) -> str | None:
+        rows = await self._select_rows(
+            "oauth_states",
+            params={"state": f"eq.{state}", "select": "state,user_id", "limit": "1"},
+        )
+        if not rows:
+            return None
+        await self._request("DELETE", "oauth_states", params={"state": f"eq.{state}"})
+        return str(rows[0]["user_id"])
+
+    async def upsert_storage_preference(
+        self,
+        user_id: str,
+        mode: str,
+        local_root: str | None,
+    ) -> StoragePreference:
+        now = _utcnow().isoformat()
+        await self._request(
+            "POST",
+            "user_storage_preferences",
+            json_body={
+                "user_id": user_id,
+                "mode": mode,
+                "local_root": local_root,
+                "updated_at": now,
+            },
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        return await self.get_storage_preference(user_id)
+
+    async def get_storage_preference(self, user_id: str) -> StoragePreference:
+        rows = await self._select_rows(
+            "user_storage_preferences",
+            params={
+                "user_id": f"eq.{user_id}",
+                "select": "mode,local_root,updated_at",
+                "limit": "1",
+            },
+        )
+        if not rows:
+            return StoragePreference(mode="local", local_root=None, updated_at=None)
+        row = rows[0]
+        return StoragePreference(
+            mode=str(row["mode"]),
+            local_root=str(row["local_root"]) if row.get("local_root") else None,
+            updated_at=_parse_datetime(str(row.get("updated_at") or "")),
+        )
+
+    async def save_legal_acceptances(
+        self,
+        user_id: str,
+        acceptances: list[tuple[str, str]],
+    ) -> list[LegalAcceptanceRecord]:
+        accepted_at = _utcnow().isoformat()
+        rows = [
+            {
+                "user_id": user_id,
+                "doc_type": doc_type,
+                "version": version,
+                "accepted_at": accepted_at,
+            }
+            for doc_type, version in acceptances
+        ]
+        await self._request(
+            "POST",
+            "legal_acceptances",
+            json_body=rows,
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        return await self.list_legal_acceptances(user_id)
+
+    async def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
+        rows = await self._select_rows(
+            "legal_acceptances",
+            params={
+                "user_id": f"eq.{user_id}",
+                "select": "doc_type,version,accepted_at",
+                "order": "accepted_at.desc",
+            },
+        )
+        return [
+            LegalAcceptanceRecord(
+                type=str(row["doc_type"]),
+                version=str(row["version"]),
+                accepted_at=_parse_datetime(str(row.get("accepted_at") or "")) or _utcnow(),
+            )
+            for row in rows
+        ]
 
 
-def _random_token(length: int) -> str:
-    import secrets
+@dataclass
+class MemoryStore(CloudStore):
+    credentials: dict[tuple[str, str], CredentialRecord] = field(default_factory=dict)
+    oauth_states: dict[str, str] = field(default_factory=dict)
+    storage_preferences: dict[str, StoragePreference] = field(default_factory=dict)
+    legal_acceptances: dict[tuple[str, str, str], LegalAcceptanceRecord] = field(default_factory=dict)
 
-    return secrets.token_urlsafe(length)
+    async def upsert_credential(
+        self,
+        user_id: str,
+        provider: str,
+        encrypted_value: str,
+        connection_type: str,
+    ) -> None:
+        now = _utcnow().isoformat()
+        self.credentials[(user_id, provider)] = CredentialRecord(
+            user_id=user_id,
+            provider=provider,
+            encrypted_value=encrypted_value,
+            connection_type=connection_type,
+            updated_at=now,
+        )
+
+    async def delete_credential(self, user_id: str, provider: str) -> None:
+        self.credentials.pop((user_id, provider), None)
+
+    async def list_statuses(self, user_id: str) -> list[ProviderStatus]:
+        statuses: list[ProviderStatus] = []
+        for provider in ("openai", "openrouter"):
+            record = self.credentials.get((user_id, provider))
+            if not record:
+                statuses.append(
+                    ProviderStatus(provider=provider, connected=False, via="none", last_updated_at=None)
+                )
+                continue
+            statuses.append(
+                ProviderStatus(
+                    provider=provider,
+                    connected=True,
+                    via=record.connection_type if record.connection_type in {"oauth", "api_key"} else "none",
+                    last_updated_at=_parse_datetime(record.updated_at),
+                )
+            )
+        return statuses
+
+    async def get_credential(self, user_id: str, provider: str) -> CredentialRecord | None:
+        return self.credentials.get((user_id, provider))
+
+    async def save_oauth_state(self, state: str, user_id: str) -> None:
+        self.oauth_states[state] = user_id
+
+    async def consume_oauth_state(self, state: str) -> str | None:
+        return self.oauth_states.pop(state, None)
+
+    async def upsert_storage_preference(
+        self,
+        user_id: str,
+        mode: str,
+        local_root: str | None,
+    ) -> StoragePreference:
+        pref = StoragePreference(mode=mode, local_root=local_root, updated_at=_utcnow())
+        self.storage_preferences[user_id] = pref
+        return pref
+
+    async def get_storage_preference(self, user_id: str) -> StoragePreference:
+        return self.storage_preferences.get(user_id, StoragePreference(mode="local", local_root=None, updated_at=None))
+
+    async def save_legal_acceptances(
+        self,
+        user_id: str,
+        acceptances: list[tuple[str, str]],
+    ) -> list[LegalAcceptanceRecord]:
+        now = _utcnow()
+        for doc_type, version in acceptances:
+            self.legal_acceptances[(user_id, doc_type, version)] = LegalAcceptanceRecord(
+                type=doc_type,
+                version=version,
+                accepted_at=now,
+            )
+        return await self.list_legal_acceptances(user_id)
+
+    async def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
+        records = [
+            record
+            for (record_user_id, _doc_type, _version), record in self.legal_acceptances.items()
+            if record_user_id == user_id
+        ]
+        return sorted(records, key=lambda record: record.accepted_at, reverse=True)

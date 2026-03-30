@@ -1,4 +1,4 @@
-import type { ProviderConnection, ProviderId } from '@notebook-ai/contracts';
+import type { ProviderConnection, ProviderId, SyncStatus } from '@notebook-ai/contracts';
 import {
   CircleCheckBig,
   CircleDashed,
@@ -20,6 +20,7 @@ import {
   Info,
 } from 'lucide-react';
 import { useState } from 'react';
+import { syncPhaseLabel, syncProgressPercent } from '../lib/syncStatus';
 
 type SettingsTab = 'general' | 'providers' | 'transcription' | 'appearance' | 'shortcuts';
 
@@ -47,6 +48,8 @@ interface Props {
   localRootPath: string;
   storageBusy: boolean;
   syncPendingOps: number;
+  syncStatus: SyncStatus | null;
+  syncActionBusy: boolean;
   driveConnected: boolean;
   driveFolderName: string;
   driveStatusBusy: boolean;
@@ -94,6 +97,8 @@ export function SettingsModal({
   localRootPath,
   storageBusy,
   syncPendingOps,
+  syncStatus,
+  syncActionBusy,
   driveConnected,
   driveFolderName,
   driveStatusBusy,
@@ -107,6 +112,8 @@ export function SettingsModal({
   onRefreshDriveStatus,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
+  const progressPercent = syncProgressPercent(syncStatus);
+  const syncLabel = syncPhaseLabel(syncStatus);
 
   if (!open) return null;
 
@@ -254,7 +261,7 @@ export function SettingsModal({
                       Account
                     </span>
                   </div>
-                  <small>{sessionUserId ? `Signed in as ${sessionUserId}` : 'Not signed in yet.'}</small>
+                  <small>{sessionUserId ? 'Desktop session active.' : 'Not signed in yet.'}</small>
                   {sessionUserId ? (
                     <div style={{ marginTop: '8px' }}>
                       <button
@@ -326,6 +333,49 @@ export function SettingsModal({
                             ? `Mirroring to "${driveFolderName || 'Notebook AI'}".`
                             : 'Connect Drive to enable cloud mirror for transcripts.'}
                         </small>
+                        {syncStatus ? (
+                          <div style={{ display: 'grid', gap: '4px', marginTop: '10px' }}>
+                            {syncLabel ? <small style={{ color: 'var(--text-secondary)' }}>{syncLabel}</small> : null}
+                            <small>
+                              {syncStatus.state === 'syncing'
+                                ? `Syncing ${syncStatus.completed_items ?? 0}/${syncStatus.total_items ?? 0}${
+                                    syncStatus.current_item ? ` • ${syncStatus.current_item}` : ''
+                                  }`
+                                : syncActionBusy
+                                  ? 'Starting Drive sync...'
+                                : driveStatusBusy && !driveConnected
+                                  ? 'Waiting for Google Drive approval in your browser.'
+                                : syncStatus.state === 'needs_setup'
+                                  ? syncStatus.last_error || 'Finish Drive setup to begin mirroring.'
+                                  : syncStatus.last_error && syncStatus.state === 'error'
+                                    ? syncStatus.last_error
+                                    : syncStatus.last_synced_at
+                                      ? `Last mirrored ${new Date(syncStatus.last_synced_at).toLocaleString()}`
+                                      : syncStatus.pending_ops > 0
+                                        ? `${syncStatus.pending_ops} change${syncStatus.pending_ops === 1 ? '' : 's'} waiting to sync.`
+                                        : 'Drive mirror is ready.'}
+                            </small>
+                            {syncStatus.state === 'syncing' && (syncStatus.total_items ?? 0) > 0 ? (
+                              <div
+                                style={{
+                                  width: '100%',
+                                  height: '6px',
+                                  borderRadius: '999px',
+                                  background: 'var(--surface-sunken)',
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: `${progressPercent}%`,
+                                    height: '100%',
+                                    background: 'var(--success)',
+                                  }}
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
                           {!driveConnected ? (
                             <button
@@ -352,10 +402,21 @@ export function SettingsModal({
                         </div>
                       </div>
                     ) : null}
-                    <button type="button" className="ghost-btn" onClick={onRunSyncNow} disabled={storageBusy}>
-                      <FolderSync size={14} />
-                      Sync now ({syncPendingOps} pending)
-                    </button>
+                    {storageMode === 'local_and_drive' ? (
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={onRunSyncNow}
+                        disabled={storageBusy || driveStatusBusy || syncActionBusy || !driveConnected || syncStatus?.state === 'syncing'}
+                      >
+                        <FolderSync size={14} />
+                        {syncActionBusy
+                          ? 'Starting sync...'
+                          : syncStatus?.state === 'syncing'
+                          ? `Syncing ${syncStatus.completed_items ?? 0}/${syncStatus.total_items ?? 0}`
+                          : `Sync now (${syncPendingOps} pending)`}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               </div>

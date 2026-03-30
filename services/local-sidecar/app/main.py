@@ -4,7 +4,8 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+import httpx
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -35,12 +36,17 @@ from .models import (
 )
 from .notes_store import NoteStore
 from .provider_status_store import ProviderStatusStore
+from .services.drive_sync_service import DriveSyncService
 from .storage_profile_store import StorageProfileStore
 from .services.ai_service import AIService
 from .services.transcription_service import TranscriptionService
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    sync_transport: httpx.AsyncBaseTransport | None = None,
+) -> FastAPI:
     current_settings = settings or Settings()
     log = configure_sidecar_logging(current_settings.debug)
     log.info("Local sidecar starting (debug=%s)", current_settings.debug)
@@ -57,6 +63,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     storage_store.set_sync_enabled(startup_pref.mode == "local_and_drive")
     ai_service = AIService(current_settings)
     transcription_service = TranscriptionService(current_settings)
+    drive_sync_service = DriveSyncService(
+        current_settings,
+        note_store,
+        storage_store,
+        transport=sync_transport,
+    )
 
     app = FastAPI(title="Notebook AI Local Sidecar", version="0.1.0")
 
@@ -73,53 +85,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthResponse(status="ok")
 
     @app.get("/notes", response_model=list[NoteDocument])
-    async def list_notes(query: str = "") -> list[NoteDocument]:
+    async def list_notes(query: str = "", authorization: str | None = Header(default=None)) -> list[NoteDocument]:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         return note_store.list_notes(query=query)
 
     @app.post("/notes", response_model=NoteDocument, status_code=status.HTTP_201_CREATED)
-    async def create_note(payload: NoteCreateRequest) -> NoteDocument:
-        return note_store.create_note(payload)
+    async def create_note(
+        payload: NoteCreateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> NoteDocument:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        created = note_store.create_note(payload)
+        drive_sync_service.request_sync()
+        return created
 
     @app.put("/notes/{note_id}", response_model=NoteDocument)
-    async def update_note(note_id: str, payload: NoteUpdateRequest) -> NoteDocument:
+    async def update_note(
+        note_id: str,
+        payload: NoteUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> NoteDocument:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
-            return note_store.update_note(note_id=note_id, payload=payload)
+            updated = note_store.update_note(note_id=note_id, payload=payload)
+            drive_sync_service.request_sync()
+            return updated
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.patch("/notes/{note_id}/move", response_model=NoteDocument)
-    async def move_note(note_id: str, payload: MoveNoteRequest) -> NoteDocument:
+    async def move_note(
+        note_id: str,
+        payload: MoveNoteRequest,
+        authorization: str | None = Header(default=None),
+    ) -> NoteDocument:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
             moved = note_store.move_note(note_id=note_id, folder_id=payload.folder_id)
-            storage_store.enqueue_sync_operation()
+            drive_sync_service.request_sync()
             return moved
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
-    async def delete_note(note_id: str) -> None:
+    async def delete_note(note_id: str, authorization: str | None = Header(default=None)) -> None:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         if not note_store.delete_note(note_id):
             raise HTTPException(status_code=404, detail=f"Note {note_id} not found")
-        storage_store.enqueue_sync_operation()
+        drive_sync_service.record_note_deletion(note_id)
 
     @app.get("/folders", response_model=list[FolderNode])
-    async def list_folders() -> list[FolderNode]:
+    async def list_folders(authorization: str | None = Header(default=None)) -> list[FolderNode]:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         return note_store.list_folders()
 
     @app.post("/folders", response_model=FolderNode, status_code=status.HTTP_201_CREATED)
-    async def create_folder(payload: FolderCreateRequest) -> FolderNode:
+    async def create_folder(
+        payload: FolderCreateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> FolderNode:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
             folder = note_store.create_folder(payload.name)
-            storage_store.enqueue_sync_operation()
+            drive_sync_service.request_sync()
             return folder
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.patch("/folders/{folder_id}", response_model=FolderNode)
-    async def update_folder(folder_id: str, payload: FolderUpdateRequest) -> FolderNode:
+    async def update_folder(
+        folder_id: str,
+        payload: FolderUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> FolderNode:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
             folder = note_store.update_folder(folder_id, payload.name)
-            storage_store.enqueue_sync_operation()
+            drive_sync_service.request_sync()
             return folder
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -127,46 +169,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
-    async def delete_folder(folder_id: str) -> None:
+    async def delete_folder(folder_id: str, authorization: str | None = Header(default=None)) -> None:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         if not note_store.delete_folder(folder_id):
             raise HTTPException(status_code=404, detail=f"Folder {folder_id} not found")
-        storage_store.enqueue_sync_operation()
+        drive_sync_service.record_folder_deletion(folder_id)
+        drive_sync_service.request_full_resync()
 
     @app.get("/storage/local-root", response_model=LocalRootResponse)
-    async def get_local_root() -> LocalRootResponse:
+    async def get_local_root(authorization: str | None = Header(default=None)) -> LocalRootResponse:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         return LocalRootResponse(local_root=note_store.get_local_root())
 
     @app.put("/storage/local-root", response_model=LocalRootResponse)
-    async def set_local_root(payload: LocalRootUpdateRequest) -> LocalRootResponse:
+    async def set_local_root(
+        payload: LocalRootUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> LocalRootResponse:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         note_store.set_notes_dir(Path(payload.local_root))
         pref = storage_store.get_preference(note_store.get_local_root())
         storage_store.set_preference(mode=pref.mode, local_root=note_store.get_local_root())
+        if pref.mode == "local_and_drive":
+            drive_sync_service.request_full_resync()
         return LocalRootResponse(local_root=note_store.get_local_root())
 
     @app.get("/storage/preference", response_model=StoragePreference)
-    async def get_storage_preference() -> StoragePreference:
+    async def get_storage_preference(
+        authorization: str | None = Header(default=None),
+    ) -> StoragePreference:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         return storage_store.get_preference(note_store.get_local_root())
 
     @app.put("/storage/preference", response_model=StoragePreference)
-    async def update_storage_preference(payload: StoragePreferenceUpdateRequest) -> StoragePreference:
+    async def update_storage_preference(
+        payload: StoragePreferenceUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> StoragePreference:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         if payload.local_root:
             note_store.set_notes_dir(Path(payload.local_root))
-        storage_store.set_sync_enabled(payload.mode == "local_and_drive")
+        enabled = payload.mode == "local_and_drive"
+        storage_store.set_sync_enabled(enabled)
+        if enabled:
+            drive_sync_service.request_full_resync()
         return storage_store.set_preference(mode=payload.mode, local_root=note_store.get_local_root())
 
     @app.get("/sync/status", response_model=SyncStatus)
-    async def get_sync_status() -> SyncStatus:
-        return storage_store.get_sync_status()
+    async def get_sync_status(authorization: str | None = Header(default=None)) -> SyncStatus:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return drive_sync_service.get_status()
 
     @app.post("/sync/run", response_model=SyncStatus)
-    async def run_sync() -> SyncStatus:
-        return storage_store.mark_sync_run()
+    async def run_sync(authorization: str | None = Header(default=None)) -> SyncStatus:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return await drive_sync_service.run_sync_now()
 
     @app.post("/ai/transform/stream")
-    async def stream_transform(payload: AITransformRequest) -> StreamingResponse:
+    async def stream_transform(
+        payload: AITransformRequest,
+        authorization: str | None = Header(default=None),
+    ) -> StreamingResponse:
         async def stream() -> AsyncIterator[str]:
             try:
-                async for token in ai_service.stream_transform(payload):
+                async for token in ai_service.stream_transform(
+                    payload,
+                    access_token=_bearer_token_from_header(authorization),
+                ):
                     yield _sse_event("token", token)
                 yield _sse_event("complete", "done")
             except Exception as exc:  # pragma: no cover - defensive path
@@ -182,14 +251,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post("/ai/interview/turns", response_model=InterviewTurnsResponse)
-    async def interview_turns(payload: InterviewTurnsRequest) -> InterviewTurnsResponse:
-        return await ai_service.extract_interview_turns(payload)
+    async def interview_turns(
+        payload: InterviewTurnsRequest,
+        authorization: str | None = Header(default=None),
+    ) -> InterviewTurnsResponse:
+        return await ai_service.extract_interview_turns(
+            payload,
+            access_token=_bearer_token_from_header(authorization),
+        )
 
     @app.post("/ai/interview/coach/stream")
-    async def stream_interview_coach(payload: InterviewCoachRequest) -> StreamingResponse:
+    async def stream_interview_coach(
+        payload: InterviewCoachRequest,
+        authorization: str | None = Header(default=None),
+    ) -> StreamingResponse:
         async def stream() -> AsyncIterator[str]:
             try:
-                async for token in ai_service.stream_interview_coach(payload):
+                async for token in ai_service.stream_interview_coach(
+                    payload,
+                    access_token=_bearer_token_from_header(authorization),
+                ):
                     yield _sse_event("token", token)
                 yield _sse_event("complete", "done")
             except Exception as exc:  # pragma: no cover - defensive path
@@ -206,10 +287,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Deprecated: retained for compatibility while desktop migrates to /ai/interview/turns + /ai/interview/coach/stream.
     @app.post("/ai/interview/stream")
-    async def stream_interview_assist(payload: InterviewAssistRequest) -> StreamingResponse:
+    async def stream_interview_assist(
+        payload: InterviewAssistRequest,
+        authorization: str | None = Header(default=None),
+    ) -> StreamingResponse:
         async def stream() -> AsyncIterator[str]:
             try:
-                async for token in ai_service.stream_interview_assist(payload):
+                async for token in ai_service.stream_interview_assist(
+                    payload,
+                    access_token=_bearer_token_from_header(authorization),
+                ):
                     yield _sse_event("token", token)
                 yield _sse_event("complete", "done")
             except Exception as exc:  # pragma: no cover - defensive path
@@ -230,6 +317,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider: str = Form(default="openai"),
         transcription_mode: str = Form(default="whisper"),
         segment_id: int | None = Form(default=None),
+        authorization: str | None = Header(default=None),
     ) -> TranscriptionChunkResponse:
         audio_bytes = await file.read()
         if not audio_bytes:
@@ -253,6 +341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider=provider,
             transcription_mode=mode,
             segment_id=segment_id,
+            access_token=_bearer_token_from_header(authorization),
         )
 
         d = result.detail
@@ -303,3 +392,10 @@ app = create_app()
 def _sse_event(event: str, data: str) -> str:
     payload = json.dumps({"event": event, "data": data})
     return f"data: {payload}\n\n"
+
+
+def _bearer_token_from_header(authorization: str | None) -> str | None:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    return token or None

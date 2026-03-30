@@ -6,12 +6,24 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
+from pydantic import ValidationError
 
-from .models import FolderNode, NoteCreateRequest, NoteDocument, NoteFrontmatter, NoteUpdateRequest
+from .models import (
+    FolderNode,
+    InterviewSessionData,
+    NoteCreateRequest,
+    NoteDocument,
+    NoteFrontmatter,
+    NoteUpdateRequest,
+    TranscriptSessionData,
+)
+from .spec_loader import load_storage_model_spec
 
 FRONTMATTER_START = "---\n"
 FRONTMATTER_END = "\n---\n"
 FOLDERS_FILENAME = ".folders.json"
+STORAGE_MODEL_SPEC = load_storage_model_spec()
+NOTE_FILENAME_SUFFIX = str(STORAGE_MODEL_SPEC.get("default_note_extension") or ".note.json")
 
 
 class NoteStore:
@@ -31,26 +43,28 @@ class NoteStore:
         return str(self.notes_dir)
 
     def list_notes(self, query: str = "") -> list[NoteDocument]:
-        notes: list[NoteDocument] = []
+        notes_by_id: dict[str, NoteDocument] = {}
         normalized_query = query.strip().lower()
 
-        for file_path in self.notes_dir.glob("*.md"):
+        for file_path in sorted(self.notes_dir.glob(f"*{NOTE_FILENAME_SUFFIX}")):
             note = self._load_note(file_path)
             if not note:
                 continue
+            notes_by_id[note.frontmatter.id] = note
 
-            if normalized_query:
-                haystack = " ".join(
-                    [
-                        note.frontmatter.title,
-                        note.body,
-                        " ".join(note.frontmatter.tags),
-                    ]
-                ).lower()
-                if normalized_query not in haystack:
-                    continue
+        for file_path in sorted(self.notes_dir.glob("*.md")):
+            note = self._load_note(file_path)
+            if not note:
+                continue
+            notes_by_id.setdefault(note.frontmatter.id, note)
 
-            notes.append(note)
+        notes = list(notes_by_id.values())
+        if normalized_query:
+            notes = [
+                note
+                for note in notes
+                if normalized_query in self._search_text_for(note).lower()
+            ]
 
         return sorted(notes, key=lambda item: item.frontmatter.updated_at, reverse=True)
 
@@ -67,65 +81,99 @@ class NoteStore:
             model=payload.model,
             folder_id=payload.folder_id,
         )
-        document = NoteDocument(frontmatter=frontmatter, body=payload.body)
+        document = self._normalize_document(
+            NoteDocument(
+                frontmatter=frontmatter,
+                kind=payload.kind,
+                content_format=payload.content_format,
+                content=payload.content,
+                session=payload.session,
+            ),
+        )
         self._save_note(document)
         return document
 
     def update_note(self, note_id: str, payload: NoteUpdateRequest) -> NoteDocument:
-        file_path = self._note_path(note_id)
-        existing = self._load_note(file_path)
+        existing = self._load_existing_note(note_id)
         if not existing:
             raise FileNotFoundError(f"Note {note_id} not found")
 
-        updated = NoteDocument(
-            frontmatter=NoteFrontmatter(
-                id=existing.frontmatter.id,
-                title=payload.title.strip() or "Untitled note",
-                created_at=existing.frontmatter.created_at,
-                updated_at=datetime.now(timezone.utc),
-                tags=payload.tags,
-                provider=payload.provider,
-                model=payload.model,
-                folder_id=existing.frontmatter.folder_id
-                if payload.folder_id is None
-                else payload.folder_id,
+        fields = payload.model_fields_set
+        next_kind = payload.kind if "kind" in fields else existing.kind
+        next_content_format = (
+            payload.content_format if "content_format" in fields else existing.content_format
+        )
+        next_content = (
+            payload.content
+            if "content" in fields or "body" in fields
+            else existing.content
+        )
+        next_session = payload.session if "session" in fields else existing.session
+        next_folder_id = (
+            existing.frontmatter.folder_id if payload.folder_id is None else payload.folder_id
+        )
+
+        updated = self._normalize_document(
+            NoteDocument(
+                frontmatter=NoteFrontmatter(
+                    id=existing.frontmatter.id,
+                    title=payload.title.strip() or "Untitled note",
+                    created_at=existing.frontmatter.created_at,
+                    updated_at=datetime.now(timezone.utc),
+                    tags=payload.tags,
+                    provider=payload.provider,
+                    model=payload.model,
+                    folder_id=next_folder_id,
+                ),
+                kind=next_kind,
+                content_format=next_content_format,
+                content=next_content,
+                session=next_session,
             ),
-            body=payload.body,
         )
         self._save_note(updated)
         return updated
 
     def move_note(self, note_id: str, folder_id: str | None) -> NoteDocument:
-        file_path = self._note_path(note_id)
-        existing = self._load_note(file_path)
+        existing = self._load_existing_note(note_id)
         if not existing:
             raise FileNotFoundError(f"Note {note_id} not found")
 
         if folder_id is not None and not self._folder_exists(folder_id):
             raise FileNotFoundError(f"Folder {folder_id} not found")
 
-        updated = NoteDocument(
-            frontmatter=NoteFrontmatter(
-                id=existing.frontmatter.id,
-                title=existing.frontmatter.title,
-                created_at=existing.frontmatter.created_at,
-                updated_at=datetime.now(timezone.utc),
-                tags=existing.frontmatter.tags,
-                provider=existing.frontmatter.provider,
-                model=existing.frontmatter.model,
-                folder_id=folder_id,
+        updated = self._normalize_document(
+            NoteDocument(
+                frontmatter=NoteFrontmatter(
+                    id=existing.frontmatter.id,
+                    title=existing.frontmatter.title,
+                    created_at=existing.frontmatter.created_at,
+                    updated_at=datetime.now(timezone.utc),
+                    tags=existing.frontmatter.tags,
+                    provider=existing.frontmatter.provider,
+                    model=existing.frontmatter.model,
+                    folder_id=folder_id,
+                ),
+                kind=existing.kind,
+                content_format=existing.content_format,
+                content=existing.content,
+                session=existing.session,
             ),
-            body=existing.body,
         )
         self._save_note(updated)
         return updated
 
     def delete_note(self, note_id: str) -> bool:
-        file_path = self._note_path(note_id)
-        if not file_path.exists():
-            return False
-        file_path.unlink(missing_ok=True)
-        return True
+        removed = False
+        json_path = self._json_note_path(note_id)
+        legacy_path = self._legacy_note_path(note_id)
+        if json_path.exists():
+            json_path.unlink(missing_ok=True)
+            removed = True
+        if legacy_path.exists():
+            legacy_path.unlink(missing_ok=True)
+            removed = True
+        return removed
 
     def list_folders(self) -> list[FolderNode]:
         rows = self._read_folders()
@@ -199,11 +247,81 @@ class NoteStore:
 
         return True
 
+    def save_note_document(self, document: NoteDocument) -> NoteDocument:
+        normalized = self._normalize_document(document)
+        self._save_note(normalized)
+        return normalized
+
+    def replace_folders(self, folders: list[FolderNode]) -> list[FolderNode]:
+        rows = [
+            {
+                "id": folder.id,
+                "name": folder.name,
+                "created_at": folder.created_at.isoformat(),
+                "updated_at": folder.updated_at.isoformat(),
+            }
+            for folder in folders
+        ]
+        self._write_folders(rows)
+        return self.list_folders()
+
+    def serialize_note_document(self, document: NoteDocument) -> str:
+        normalized = self._normalize_document(document)
+        payload = {
+            "version": 1,
+            "frontmatter": {
+                "id": normalized.frontmatter.id,
+                "title": normalized.frontmatter.title,
+                "created_at": normalized.frontmatter.created_at.isoformat(),
+                "updated_at": normalized.frontmatter.updated_at.isoformat(),
+                "tags": normalized.frontmatter.tags,
+                "provider": normalized.frontmatter.provider,
+                "model": normalized.frontmatter.model,
+                "folder_id": normalized.frontmatter.folder_id,
+            },
+            "kind": normalized.kind,
+            "content_format": normalized.content_format,
+            "content": normalized.content,
+            "session": (
+                normalized.session.model_dump(mode="json")
+                if normalized.session is not None
+                else None
+            ),
+        }
+        return json.dumps(payload, indent=2) + "\n"
+
+    def serialize_folders(self, folders: list[FolderNode] | None = None) -> str:
+        source = folders if folders is not None else self.list_folders()
+        rows = [
+            {
+                "id": folder.id,
+                "name": folder.name,
+                "created_at": folder.created_at.isoformat(),
+                "updated_at": folder.updated_at.isoformat(),
+            }
+            for folder in source
+        ]
+        return json.dumps(rows, indent=2) + "\n"
+
     def _folder_exists(self, folder_id: str) -> bool:
         return any(folder.id == folder_id for folder in self.list_folders())
 
-    def _note_path(self, note_id: str) -> Path:
+    def _json_note_path(self, note_id: str) -> Path:
+        return self.notes_dir / f"{note_id}{NOTE_FILENAME_SUFFIX}"
+
+    def _legacy_note_path(self, note_id: str) -> Path:
         return self.notes_dir / f"{note_id}.md"
+
+    def _load_existing_note(self, note_id: str) -> NoteDocument | None:
+        json_path = self._json_note_path(note_id)
+        if json_path.exists():
+            return self._load_note(json_path)
+
+        legacy_path = self._legacy_note_path(note_id)
+        if legacy_path.exists():
+            return self._load_note(legacy_path)
+
+        return None
 
     def _read_folders(self) -> list[dict[str, object]]:
         if not self._folders_path.exists():
@@ -230,39 +348,163 @@ class NoteStore:
         if not file_path.exists():
             return None
 
+        if file_path.name.endswith(NOTE_FILENAME_SUFFIX):
+            return self._load_structured_note(file_path)
+        if file_path.suffix == ".md":
+            return self._load_legacy_markdown(file_path)
+        return None
+
+    def _load_structured_note(self, file_path: Path) -> NoteDocument | None:
+        try:
+            raw = json.loads(file_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(raw, dict):
+            return None
+
+        try:
+            document = NoteDocument.model_validate(
+                {
+                    "frontmatter": raw.get("frontmatter", {}),
+                    "kind": raw.get("kind") or "note",
+                    "content_format": raw.get("content_format") or "plain_text",
+                    "content": raw.get("content") or "",
+                    "session": raw.get("session"),
+                },
+            )
+        except ValidationError:
+            return None
+
+        return self._normalize_document(document)
+
+    def _load_legacy_markdown(self, file_path: Path) -> NoteDocument | None:
         raw = file_path.read_text(encoding="utf-8")
         frontmatter_data, body = self._parse_markdown(raw)
         created_at = _parse_datetime(frontmatter_data.get("created_at"))
         updated_at = _parse_datetime(frontmatter_data.get("updated_at"))
 
-        frontmatter = NoteFrontmatter(
-            id=str(frontmatter_data.get("id") or file_path.stem),
-            title=str(frontmatter_data.get("title") or "Untitled note"),
-            created_at=created_at,
-            updated_at=updated_at,
-            tags=list(frontmatter_data.get("tags") or []),
-            provider=frontmatter_data.get("provider"),
-            model=frontmatter_data.get("model"),
-            folder_id=frontmatter_data.get("folder_id"),
+        document = NoteDocument(
+            frontmatter=NoteFrontmatter(
+                id=str(frontmatter_data.get("id") or file_path.stem),
+                title=str(frontmatter_data.get("title") or "Untitled note"),
+                created_at=created_at,
+                updated_at=updated_at,
+                tags=list(frontmatter_data.get("tags") or []),
+                provider=frontmatter_data.get("provider"),
+                model=frontmatter_data.get("model"),
+                folder_id=frontmatter_data.get("folder_id"),
+            ),
+            kind="note",
+            content_format="markdown",
+            content=body,
+            session=None,
         )
-
-        return NoteDocument(frontmatter=frontmatter, body=body)
+        return self._normalize_document(document)
 
     def _save_note(self, note: NoteDocument) -> None:
-        data = {
-            "id": note.frontmatter.id,
-            "title": note.frontmatter.title,
-            "created_at": note.frontmatter.created_at.isoformat(),
-            "updated_at": note.frontmatter.updated_at.isoformat(),
-            "tags": note.frontmatter.tags,
-            "provider": note.frontmatter.provider,
-            "model": note.frontmatter.model,
-            "folder_id": note.frontmatter.folder_id,
+        normalized = self._normalize_document(note)
+        payload = {
+            "version": 1,
+            "frontmatter": {
+                "id": normalized.frontmatter.id,
+                "title": normalized.frontmatter.title,
+                "created_at": normalized.frontmatter.created_at.isoformat(),
+                "updated_at": normalized.frontmatter.updated_at.isoformat(),
+                "tags": normalized.frontmatter.tags,
+                "provider": normalized.frontmatter.provider,
+                "model": normalized.frontmatter.model,
+                "folder_id": normalized.frontmatter.folder_id,
+            },
+            "kind": normalized.kind,
+            "content_format": normalized.content_format,
+            "content": normalized.content,
+            "session": (
+                normalized.session.model_dump(mode="json")
+                if normalized.session is not None
+                else None
+            ),
         }
-        yaml_blob = yaml.safe_dump(data, sort_keys=False, allow_unicode=False).strip()
-        body = note.body.rstrip()
-        content = f"{FRONTMATTER_START}{yaml_blob}{FRONTMATTER_END}{body}\n"
-        self._note_path(note.frontmatter.id).write_text(content, encoding="utf-8")
+        self._json_note_path(normalized.frontmatter.id).write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        legacy_path = self._legacy_note_path(normalized.frontmatter.id)
+        if legacy_path.exists():
+            legacy_path.unlink(missing_ok=True)
+
+    def _search_text_for(self, note: NoteDocument) -> str:
+        parts = [
+            note.frontmatter.title,
+            note.content,
+            " ".join(note.frontmatter.tags),
+        ]
+
+        if isinstance(note.session, TranscriptSessionData):
+            parts.append(note.session.transcript)
+        elif isinstance(note.session, InterviewSessionData):
+            parts.extend(
+                [
+                    note.session.transcript,
+                    note.session.guidance,
+                    " ".join(turn.text for turn in note.session.turns),
+                ],
+            )
+
+        return " ".join(part for part in parts if part)
+
+    def _normalize_document(self, note: NoteDocument) -> NoteDocument:
+        content = note.content
+        session = note.session
+        content_format = note.content_format
+
+        if note.kind == "transcript":
+            transcript = ""
+            last_updated_at = note.frontmatter.updated_at
+            if isinstance(session, TranscriptSessionData):
+                transcript = session.transcript or content
+                last_updated_at = session.last_updated_at or note.frontmatter.updated_at
+            else:
+                transcript = content
+            content = transcript
+            content_format = "plain_text"
+            session = TranscriptSessionData(
+                transcript=transcript,
+                last_updated_at=last_updated_at,
+            )
+        elif note.kind == "interview_assist":
+            transcript = ""
+            guidance = ""
+            turns = []
+            last_coached_turn = None
+            last_updated_at = note.frontmatter.updated_at
+            if isinstance(session, InterviewSessionData):
+                transcript = session.transcript or content
+                guidance = session.guidance
+                turns = session.turns
+                last_coached_turn = session.last_coached_interviewer_turn_id
+                last_updated_at = session.last_updated_at or note.frontmatter.updated_at
+            else:
+                transcript = content
+            content = transcript
+            content_format = "plain_text"
+            session = InterviewSessionData(
+                transcript=transcript,
+                guidance=guidance,
+                turns=turns,
+                last_coached_interviewer_turn_id=last_coached_turn,
+                last_updated_at=last_updated_at,
+            )
+        else:
+            session = None
+
+        return NoteDocument(
+            frontmatter=note.frontmatter,
+            kind=note.kind,
+            content_format=content_format,
+            content=content,
+            session=session,
+        )
 
     @staticmethod
     def _parse_markdown(raw: str) -> tuple[dict, str]:
@@ -282,9 +524,14 @@ class NoteStore:
         return parsed, body
 
 
-def _parse_datetime(raw_value: str | None) -> datetime:
+def _parse_datetime(raw_value: str | datetime | None) -> datetime:
     if not raw_value:
         return datetime.now(timezone.utc)
+
+    if isinstance(raw_value, datetime):
+        if raw_value.tzinfo is None:
+            return raw_value.replace(tzinfo=timezone.utc)
+        return raw_value
 
     try:
         parsed = datetime.fromisoformat(raw_value)

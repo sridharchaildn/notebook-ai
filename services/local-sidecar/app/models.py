@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 ProviderId = Literal["openai", "openrouter"]
 TransformType = Literal["summarize", "rewrite", "extract_action_items"]
 ToneType = Literal["concise", "professional", "friendly", "actionable"]
 InterviewRole = Literal["interviewer", "interviewee"]
+NoteKind = Literal["note", "transcript", "interview_assist"]
+ContentFormat = Literal["plain_text", "markdown"]
+WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
+SyncState = Literal["idle", "syncing", "needs_setup", "error"]
+SyncPhase = Literal["idle", "preparing", "pulling", "merging", "pushing", "finalizing"]
 TranscriptionErrorCode = Literal[
     "invalid_audio_format",
     "auth_or_quota",
@@ -29,27 +34,77 @@ class NoteFrontmatter(BaseModel):
     folder_id: str | None = None
 
 
+class InterviewTurn(BaseModel):
+    id: str
+    role: InterviewRole
+    text: str
+
+
+class TranscriptSessionData(BaseModel):
+    session_type: Literal["transcript"] = "transcript"
+    transcript: str = ""
+    last_updated_at: datetime | None = None
+
+
+class InterviewSessionData(BaseModel):
+    session_type: Literal["interview_assist"] = "interview_assist"
+    transcript: str = ""
+    guidance: str = ""
+    turns: list[InterviewTurn] = Field(default_factory=list)
+    last_coached_interviewer_turn_id: str | None = None
+    last_updated_at: datetime | None = None
+
+
+NoteSessionData = Annotated[
+    TranscriptSessionData | InterviewSessionData,
+    Field(discriminator="session_type"),
+]
+
+
 class NoteDocument(BaseModel):
     frontmatter: NoteFrontmatter
-    body: str
+    kind: NoteKind = "note"
+    content_format: ContentFormat = "plain_text"
+    content: str = ""
+    session: NoteSessionData | None = None
 
 
 class NoteCreateRequest(BaseModel):
     title: str = "Untitled note"
-    body: str = ""
+    content: str = ""
+    body: str | None = None
     tags: list[str] = Field(default_factory=list)
     provider: ProviderId | None = None
     model: str | None = None
     folder_id: str | None = None
+    kind: NoteKind = "note"
+    content_format: ContentFormat = "plain_text"
+    session: NoteSessionData | None = None
+
+    @model_validator(mode="after")
+    def fill_content_from_legacy_body(self) -> "NoteCreateRequest":
+        if self.body is not None and not self.content:
+            self.content = self.body
+        return self
 
 
 class NoteUpdateRequest(BaseModel):
     title: str
-    body: str
+    content: str = ""
+    body: str | None = None
     tags: list[str] = Field(default_factory=list)
     provider: ProviderId | None = None
     model: str | None = None
     folder_id: str | None = None
+    kind: NoteKind = "note"
+    content_format: ContentFormat = "plain_text"
+    session: NoteSessionData | None = None
+
+    @model_validator(mode="after")
+    def fill_content_from_legacy_body(self) -> "NoteUpdateRequest":
+        if self.body is not None and not self.content:
+            self.content = self.body
+        return self
 
 
 class MoveNoteRequest(BaseModel):
@@ -69,12 +124,6 @@ class InterviewAssistRequest(BaseModel):
     transcript: str
     provider: ProviderId | None = None
     model: str | None = None
-
-
-class InterviewTurn(BaseModel):
-    id: str
-    role: InterviewRole
-    text: str
 
 
 class InterviewTurnsRequest(BaseModel):
@@ -113,6 +162,16 @@ class ProviderStatusUpdateRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+
+
+class WorkspaceDescriptor(BaseModel):
+    id: str
+    name: str
+    kind: WorkspaceKind
+    storage_mode: Literal["local", "local_and_drive"] = "local"
+    drive_folder_id: str | None = None
+    local_root: str | None = None
+    updated_at: datetime | None = None
 
 
 class TranscriptionChunkResponse(BaseModel):
@@ -163,5 +222,11 @@ class LocalRootUpdateRequest(BaseModel):
 class SyncStatus(BaseModel):
     enabled: bool = False
     pending_ops: int = 0
+    state: SyncState = "idle"
+    phase: SyncPhase | None = "idle"
+    current_item: str | None = None
+    completed_items: int = 0
+    total_items: int = 0
     last_run_at: datetime | None = None
+    last_synced_at: datetime | None = None
     last_error: str | None = None
