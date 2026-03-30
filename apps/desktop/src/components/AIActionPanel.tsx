@@ -1,10 +1,17 @@
-import type { AITransformType } from '@notebook-ai/contracts';
-import { FileText, ListChecks, LoaderCircle, Sparkles, Wand2 } from 'lucide-react';
+import type { AITransformType, CopilotChatMessage } from '@notebook-ai/contracts';
+import { FileText, ListChecks, LoaderCircle, MessageSquareText, Send, Sparkles, Wand2 } from 'lucide-react';
 
 interface Props {
   output: string;
   running: boolean;
   onRun: (action: AITransformType) => void;
+  transcriptChatEnabled: boolean;
+  chatDraft: string;
+  chatHistory: CopilotChatMessage[];
+  chatBusy: boolean;
+  onChatDraftChange: (value: string) => void;
+  onSendChat: () => void;
+  onClearChat: () => void;
 }
 
 const actions: Array<{ id: AITransformType; label: string; description: string; icon: React.ReactNode }> = [
@@ -28,7 +35,18 @@ const actions: Array<{ id: AITransformType; label: string; description: string; 
   },
 ];
 
-export function AIActionPanel({ output, running, onRun }: Props) {
+export function AIActionPanel({
+  output,
+  running,
+  onRun,
+  transcriptChatEnabled,
+  chatDraft,
+  chatHistory,
+  chatBusy,
+  onChatDraftChange,
+  onSendChat,
+  onClearChat,
+}: Props) {
   return (
     <section className="ai-panel">
       <div className="section-title-row">
@@ -59,6 +77,52 @@ export function AIActionPanel({ output, running, onRun }: Props) {
       <div className="ai-output" role="status" aria-live="polite">
         {output || 'AI output appears here as tokens stream in.'}
       </div>
+
+      {transcriptChatEnabled ? (
+        <section className="copilot-chat">
+          <div className="copilot-chat__header">
+            <div>
+              <h3>Ask Copilot</h3>
+              <p>Ask about this transcript, the context, or who said what.</p>
+            </div>
+            <button type="button" className="ghost-btn" onClick={onClearChat} disabled={chatBusy || chatHistory.length === 0}>
+              Clear
+            </button>
+          </div>
+          <div className="copilot-chat__messages">
+            {chatHistory.length === 0 ? (
+              <div className="copilot-chat__empty">
+                <MessageSquareText size={16} />
+                <span>Ask a question like “What did I commit to?” or “Summarize the other side’s concerns.”</span>
+              </div>
+            ) : (
+              chatHistory.map((message, index) => (
+                <article key={`${message.role}-${index}`} className={`copilot-chat__message ${message.role}`}>
+                  <div className="copilot-chat__role">{message.role === 'user' ? 'You' : 'Copilot'}</div>
+                  <div className="copilot-chat__content">{message.content || (chatBusy ? 'Thinking…' : '')}</div>
+                </article>
+              ))
+            )}
+          </div>
+          <div className="copilot-chat__composer">
+            <textarea
+              value={chatDraft}
+              onChange={(event) => onChatDraftChange(event.target.value)}
+              placeholder="Ask Copilot about this transcript..."
+              rows={3}
+            />
+            <button
+              type="button"
+              className="solid-btn"
+              disabled={chatBusy || chatDraft.trim().length === 0}
+              onClick={onSendChat}
+            >
+              <Send size={14} />
+              {chatBusy ? 'Sending...' : 'Send'}
+            </button>
+          </div>
+        </section>
+      ) : null}
     </section>
   );
 }

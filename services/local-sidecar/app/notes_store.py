@@ -80,6 +80,8 @@ class NoteStore:
             provider=payload.provider,
             model=payload.model,
             folder_id=payload.folder_id,
+            context_preset=payload.context_preset,
+            context_text=payload.context_text,
         )
         document = self._normalize_document(
             NoteDocument(
@@ -112,6 +114,16 @@ class NoteStore:
         next_folder_id = (
             existing.frontmatter.folder_id if payload.folder_id is None else payload.folder_id
         )
+        next_context_preset = (
+            existing.frontmatter.context_preset
+            if payload.context_preset is None
+            else payload.context_preset
+        )
+        next_context_text = (
+            existing.frontmatter.context_text
+            if payload.context_text is None
+            else payload.context_text
+        )
 
         updated = self._normalize_document(
             NoteDocument(
@@ -124,6 +136,8 @@ class NoteStore:
                     provider=payload.provider,
                     model=payload.model,
                     folder_id=next_folder_id,
+                    context_preset=next_context_preset,
+                    context_text=next_context_text,
                 ),
                 kind=next_kind,
                 content_format=next_content_format,
@@ -153,6 +167,8 @@ class NoteStore:
                     provider=existing.frontmatter.provider,
                     model=existing.frontmatter.model,
                     folder_id=folder_id,
+                    context_preset=existing.frontmatter.context_preset,
+                    context_text=existing.frontmatter.context_text,
                 ),
                 kind=existing.kind,
                 content_format=existing.content_format,
@@ -278,6 +294,8 @@ class NoteStore:
                 "provider": normalized.frontmatter.provider,
                 "model": normalized.frontmatter.model,
                 "folder_id": normalized.frontmatter.folder_id,
+                "context_preset": normalized.frontmatter.context_preset,
+                "context_text": normalized.frontmatter.context_text,
             },
             "kind": normalized.kind,
             "content_format": normalized.content_format,
@@ -394,6 +412,8 @@ class NoteStore:
                 provider=frontmatter_data.get("provider"),
                 model=frontmatter_data.get("model"),
                 folder_id=frontmatter_data.get("folder_id"),
+                context_preset=frontmatter_data.get("context_preset"),
+                context_text=frontmatter_data.get("context_text"),
             ),
             kind="note",
             content_format="markdown",
@@ -415,6 +435,8 @@ class NoteStore:
                 "provider": normalized.frontmatter.provider,
                 "model": normalized.frontmatter.model,
                 "folder_id": normalized.frontmatter.folder_id,
+                "context_preset": normalized.frontmatter.context_preset,
+                "context_text": normalized.frontmatter.context_text,
             },
             "kind": normalized.kind,
             "content_format": normalized.content_format,
@@ -438,6 +460,8 @@ class NoteStore:
             note.frontmatter.title,
             note.content,
             " ".join(note.frontmatter.tags),
+            note.frontmatter.context_preset or "",
+            note.frontmatter.context_text or "",
         ]
 
         if isinstance(note.session, TranscriptSessionData):
@@ -463,13 +487,16 @@ class NoteStore:
             last_updated_at = note.frontmatter.updated_at
             if isinstance(session, TranscriptSessionData):
                 transcript = session.transcript or content
+                segments = session.segments
                 last_updated_at = session.last_updated_at or note.frontmatter.updated_at
             else:
                 transcript = content
+                segments = []
             content = transcript
             content_format = "plain_text"
             session = TranscriptSessionData(
                 transcript=transcript,
+                segments=segments,
                 last_updated_at=last_updated_at,
             )
         elif note.kind == "interview_assist":

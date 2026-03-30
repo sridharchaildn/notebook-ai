@@ -13,6 +13,7 @@ from .config import Settings
 from .logging_setup import configure_sidecar_logging
 from .models import (
     AITransformRequest,
+    CopilotChatRequest,
     FolderCreateRequest,
     FolderNode,
     FolderUpdateRequest,
@@ -250,6 +251,31 @@ def create_app(
             },
         )
 
+    @app.post("/ai/copilot/chat/stream")
+    async def stream_copilot_chat(
+        payload: CopilotChatRequest,
+        authorization: str | None = Header(default=None),
+    ) -> StreamingResponse:
+        async def stream() -> AsyncIterator[str]:
+            try:
+                async for token in ai_service.stream_copilot_chat(
+                    payload,
+                    access_token=_bearer_token_from_header(authorization),
+                ):
+                    yield _sse_event("token", token)
+                yield _sse_event("complete", "done")
+            except Exception as exc:  # pragma: no cover - defensive path
+                yield _sse_event("error", str(exc))
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+
     @app.post("/ai/interview/turns", response_model=InterviewTurnsResponse)
     async def interview_turns(
         payload: InterviewTurnsRequest,
@@ -318,6 +344,9 @@ def create_app(
         transcription_mode: str = Form(default="whisper"),
         segment_id: int | None = Form(default=None),
         model: str | None = Form(default=None),
+        context_preset: str | None = Form(default=None),
+        context_text: str | None = Form(default=None),
+        source_hint: str | None = Form(default=None),
         authorization: str | None = Header(default=None),
     ) -> TranscriptionChunkResponse:
         audio_bytes = await file.read()
@@ -343,6 +372,9 @@ def create_app(
             transcription_mode=mode,
             segment_id=segment_id,
             model=model,
+            context_preset=context_preset,
+            context_text=context_text,
+            source_hint=source_hint,
             access_token=_bearer_token_from_header(authorization),
         )
 

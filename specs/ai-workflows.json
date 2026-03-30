@@ -26,6 +26,11 @@
       "label": "Interview coach",
       "output_mode": "sse_text",
       "max_lines": 3
+    },
+    {
+      "id": "copilot_chat",
+      "label": "Copilot chat",
+      "output_mode": "sse_text"
     }
   ]
 }

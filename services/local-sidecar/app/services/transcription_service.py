@@ -23,6 +23,67 @@ TRANSCRIBE_LLM_PROMPT = (
 )
 
 
+def _build_llm_transcription_prompt(
+    *,
+    context_preset: str | None,
+    context_text: str | None,
+    source_hint: str | None,
+) -> str:
+    extra = _build_transcription_context_lines(
+        context_preset=context_preset,
+        context_text=context_text,
+        source_hint=source_hint,
+    )
+    if not extra:
+        return TRANSCRIBE_LLM_PROMPT
+    return f"{TRANSCRIBE_LLM_PROMPT}\n{extra}"
+
+
+def _build_whisper_prompt(
+    *,
+    context_preset: str | None,
+    context_text: str | None,
+    source_hint: str | None,
+) -> str:
+    extra = _build_transcription_context_lines(
+        context_preset=context_preset,
+        context_text=context_text,
+        source_hint=source_hint,
+    )
+    if not extra:
+        return ""
+    return f"Context: {extra}"
+
+
+def _build_transcription_context_lines(
+    *,
+    context_preset: str | None,
+    context_text: str | None,
+    source_hint: str | None,
+) -> str:
+    lines: list[str] = []
+    normalized_preset = (context_preset or "").strip().lower()
+    normalized_source = (source_hint or "").strip().lower()
+    if normalized_preset == "meeting":
+        lines.append("This audio is from a meeting or call.")
+    elif normalized_preset == "podcast":
+        lines.append("This audio is from a podcast episode.")
+    elif normalized_preset == "youtube":
+        lines.append("This audio is from a YouTube video.")
+    elif normalized_preset == "custom":
+        lines.append("Use the user-provided context to improve wording and punctuation only.")
+
+    if normalized_source == "me":
+        lines.append("This audio source is the local user's microphone.")
+    elif normalized_source == "other_audio":
+        lines.append("This audio source is the remote or system-audio side.")
+
+    if context_text and context_text.strip():
+        lines.append(f"User context: {context_text.strip()}")
+
+    return " ".join(lines).strip()
+
+
 @dataclass
 class TranscriptionResult:
     text: str
@@ -56,6 +117,9 @@ class TranscriptionService:
         transcription_mode: str = "whisper",
         segment_id: int | None = None,
         model: str | None = None,
+        context_preset: str | None = None,
+        context_text: str | None = None,
+        source_hint: str | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         log.debug(
@@ -74,6 +138,9 @@ class TranscriptionService:
                 content_type=content_type,
                 provider=provider,
                 model=model,
+                context_preset=context_preset,
+                context_text=context_text,
+                source_hint=source_hint,
                 access_token=access_token,
             )
             result.segment_id = segment_id
@@ -85,6 +152,9 @@ class TranscriptionService:
             content_type=content_type,
             provider=provider,
             model=model,
+            context_preset=context_preset,
+            context_text=context_text,
+            source_hint=source_hint,
             access_token=access_token,
         )
         result.segment_id = segment_id
@@ -98,6 +168,9 @@ class TranscriptionService:
         content_type: str,
         provider: str,
         model: str | None = None,
+        context_preset: str | None = None,
+        context_text: str | None = None,
+        source_hint: str | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         or_key = await self._resolve_openrouter_api_key(access_token=access_token)
@@ -176,7 +249,14 @@ class TranscriptionService:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": TRANSCRIBE_LLM_PROMPT},
+                        {
+                            "type": "text",
+                            "text": _build_llm_transcription_prompt(
+                                context_preset=context_preset,
+                                context_text=context_text,
+                                source_hint=source_hint,
+                            ),
+                        },
                         {
                             "type": "input_audio",
                             "input_audio": {
@@ -297,6 +377,9 @@ class TranscriptionService:
         content_type: str,
         provider: str,
         model: str | None = None,
+        context_preset: str | None = None,
+        context_text: str | None = None,
+        source_hint: str | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         if provider != "openai":
@@ -347,6 +430,11 @@ class TranscriptionService:
         last_error: str | None = None
         last_error_code = "provider_http_error"
         last_recoverable = False
+        prompt = _build_whisper_prompt(
+            context_preset=context_preset,
+            context_text=context_text,
+            source_hint=source_hint,
+        )
         async with httpx.AsyncClient(timeout=30.0) as client:
             for model in models_to_try:
                 try:
@@ -354,7 +442,10 @@ class TranscriptionService:
                     response = await client.post(
                         OPENAI_TRANSCRIPTION_URL,
                         headers={"Authorization": f"Bearer {api_key}"},
-                        data={"model": model},
+                        data={
+                            "model": model,
+                            **({"prompt": prompt} if prompt else {}),
+                        },
                         files={"file": (filename, audio_bytes, content_type)},
                     )
 

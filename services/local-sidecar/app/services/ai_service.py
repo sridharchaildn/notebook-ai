@@ -11,11 +11,13 @@ import httpx
 from ..config import Settings
 from ..models import (
     AITransformRequest,
+    CopilotChatRequest,
     InterviewAssistRequest,
     InterviewCoachRequest,
     InterviewTurn,
     InterviewTurnsRequest,
     InterviewTurnsResponse,
+    NoteAIContext,
 )
 from ..providers import OpenAIAdapter, OpenRouterAdapter
 
@@ -120,6 +122,27 @@ class AIService:
             return
 
         system_prompt, user_prompt = _build_interview_coach_prompts(payload)
+        async for token in adapter.stream_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=payload.model,
+        ):
+            yield token
+
+    async def stream_copilot_chat(
+        self,
+        payload: CopilotChatRequest,
+        access_token: str | None = None,
+    ) -> AsyncIterator[str]:
+        provider = payload.provider or self.settings.default_provider
+        adapter = await self._resolve_adapter(provider, access_token)
+
+        if adapter is None:
+            async for token in _stream_local_chat_fallback(payload):
+                yield token
+            return
+
+        system_prompt, user_prompt = _build_copilot_chat_prompts(payload)
         async for token in adapter.stream_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -239,31 +262,44 @@ async def _collect_completion(
 
 
 def _build_prompts(payload: AITransformRequest) -> tuple[str, str]:
+    context_block = _build_note_context_block(payload.note_context)
     if payload.transform == "summarize":
         system = (
             "You are a precise note assistant. Produce concise, high-signal summaries "
-            "with clear bullet points and no fluff."
+            "with clear bullet points and no fluff. When source hints are available, "
+            "preserve who said what."
         )
-        user = f"Summarize this note in 5-8 bullets:\n\n{payload.content}"
+        user = (
+            "Summarize this note in 5-8 bullets.\n\n"
+            f"{context_block}"
+            f"Note content:\n{payload.content}"
+        )
         return system, user
 
     if payload.transform == "rewrite":
         system = (
             "You rewrite notes to improve clarity while preserving meaning. "
-            "Keep structure readable and avoid adding unsupported details."
+            "Keep structure readable and avoid adding unsupported details. "
+            "Do not erase source attribution when the note provides it."
         )
         user = (
             f"Rewrite this note in a {payload.tone} tone. "
             "Keep all key facts and improve clarity:\n\n"
-            f"{payload.content}"
+            f"{context_block}"
+            f"Note content:\n{payload.content}"
         )
         return system, user
 
     system = (
         "Extract actionable tasks from notes. Return concise markdown checkboxes with "
-        "specific outcomes."
+        "specific outcomes. For meetings, distinguish my commitments from other participants "
+        "when source hints are available."
     )
-    user = f"Extract action items from this note:\n\n{payload.content}"
+    user = (
+        "Extract action items from this note:\n\n"
+        f"{context_block}"
+        f"Note content:\n{payload.content}"
+    )
     return system, user
 
 
@@ -316,6 +352,68 @@ def _build_interview_coach_prompts(payload: InterviewCoachRequest) -> tuple[str,
         "Provide the next best answer now."
     )
     return system, user
+
+
+def _build_copilot_chat_prompts(payload: CopilotChatRequest) -> tuple[str, str]:
+    context_block = _build_note_context_block(payload.note_context)
+    history_lines = [
+        f"{message.role.title()}: {message.content.strip()}"
+        for message in payload.history[-6:]
+        if message.content.strip()
+    ]
+    history_block = "\n".join(history_lines).strip()
+    recent_chat_block = f"Recent chat:\n{history_block}\n\n" if history_block else ""
+    system = (
+        "You are Notebook AI Copilot.\n"
+        "Answer using only the transcript/note content and metadata provided.\n"
+        "Return plain text only. Be concise, accurate, and directly useful.\n"
+        "If the answer is not supported by the note, say that clearly.\n"
+        "When source hints are present, distinguish what the user said from the other audio."
+    )
+    user = (
+        f"{context_block}"
+        f"Transcript or note content:\n{payload.content.strip()}\n\n"
+        f"{recent_chat_block}"
+        f"Question:\n{payload.question.strip()}"
+    )
+    return system, user
+
+
+def _build_note_context_block(note_context: NoteAIContext | None) -> str:
+    if note_context is None:
+        return ""
+
+    parts: list[str] = []
+    if note_context.title.strip():
+        parts.append(f"Title: {note_context.title.strip()}")
+    if note_context.note_kind:
+        parts.append(f"Note type: {note_context.note_kind}")
+    if note_context.tags:
+        parts.append(f"Tags: {', '.join(tag for tag in note_context.tags if tag.strip())}")
+    if note_context.context_preset:
+        parts.append(f"Context preset: {note_context.context_preset}")
+    if note_context.context_text and note_context.context_text.strip():
+        parts.append(f"User context: {note_context.context_text.strip()}")
+    if note_context.transcript_segments:
+        parts.append("Source-aware transcript segments:")
+        for segment in note_context.transcript_segments[:24]:
+            text = segment.text.strip()
+            if not text:
+                continue
+            parts.append(f"- {_source_hint_label(segment.source_hint)}: {text}")
+
+    if not parts:
+        return ""
+
+    return "Note metadata:\n" + "\n".join(parts) + "\n\n"
+
+
+def _source_hint_label(source_hint: str | None) -> str:
+    if source_hint == "me":
+        return "Me"
+    if source_hint == "other_audio":
+        return "Other audio"
+    return "Unknown source"
 
 
 def _parse_turns_completion(raw: str) -> list[InterviewTurn]:
@@ -516,6 +614,13 @@ async def _stream_local_coach_fallback(payload: InterviewCoachRequest) -> AsyncI
         await asyncio.sleep(0)
 
 
+async def _stream_local_chat_fallback(payload: CopilotChatRequest) -> AsyncIterator[str]:
+    transformed = _deterministic_chat_fallback(payload)
+    for piece in re.findall(r"\S+\s*", transformed):
+        yield piece
+        await asyncio.sleep(0)
+
+
 def _deterministic_transform(payload: AITransformRequest) -> str:
     text = payload.content.strip()
     if not text:
@@ -568,3 +673,59 @@ def _deterministic_coach_fallback(payload: InterviewCoachRequest) -> str:
         "Then share one concrete example from my work.\n"
         "Close with the business impact."
     )
+
+
+def _deterministic_chat_fallback(payload: CopilotChatRequest) -> str:
+    question = payload.question.strip()
+    lowered_question = question.lower()
+    haystacks: list[str] = [payload.content]
+    if payload.note_context is not None:
+        haystacks.append(payload.note_context.context_text or "")
+        haystacks.extend(segment.text for segment in payload.note_context.transcript_segments)
+
+    combined = "\n".join(part for part in haystacks if part.strip())
+    if any(
+        phrase in lowered_question
+        for phrase in (
+            "what did i commit",
+            "what did i say",
+            "what did i promise",
+            "my action item",
+            "my commitment",
+        )
+    ):
+        my_lines: list[str] = []
+        if payload.note_context is not None:
+            my_lines.extend(
+                segment.text.strip()
+                for segment in payload.note_context.transcript_segments
+                if segment.source_hint == "me" and segment.text.strip()
+            )
+        if not my_lines:
+            my_lines.extend(
+                line.split(":", 1)[1].strip()
+                for line in payload.content.splitlines()
+                if ":" in line
+                and line.split(":", 1)[0].strip().lower() in {"me", "user", "candidate"}
+                and line.split(":", 1)[1].strip()
+            )
+        if my_lines:
+            return f"Based on this note, you said: {' '.join(my_lines[:3])}"
+
+    tokens = [token for token in re.findall(r"[a-z0-9]{4,}", question.lower())][:6]
+    matching_lines = [
+        line.strip()
+        for line in combined.splitlines()
+        if line.strip() and (not tokens or any(token in line.lower() for token in tokens))
+    ]
+    if matching_lines:
+        excerpt = " ".join(matching_lines[:3])
+        return f"Based on this note, the closest relevant excerpt is: {excerpt}"
+
+    if payload.note_context and payload.note_context.context_preset:
+        return (
+            f"I couldn't find a direct answer in this {payload.note_context.context_preset} note. "
+            "Ask about something stated in the transcript or summary."
+        )
+
+    return "I couldn't find a direct answer in this note. Ask about something stated in the transcript or note."

@@ -1,4 +1,5 @@
 import type {
+  CopilotChatRequest,
   AITransformRequest,
   AITransformType,
   ContentFormat,
@@ -12,7 +13,9 @@ import type {
   LegalDocument,
   ModelUseCase,
   MoveNoteRequest,
+  NoteAIContext,
   NoteDocument,
+  NoteContextPreset,
   NoteKind,
   NoteSessionData,
   OAuthStartResponse,
@@ -205,6 +208,8 @@ export interface SaveNoteInput {
   kind?: NoteKind;
   content_format?: ContentFormat;
   session?: NoteSessionData | null;
+  context_preset?: NoteContextPreset | null;
+  context_text?: string | null;
 }
 
 export async function fetchNotes(query = ''): Promise<NoteDocument[]> {
@@ -529,15 +534,41 @@ export async function streamTransform(
   tone: AITransformRequest['tone'] = 'concise',
   provider?: ProviderId,
   model?: string,
+  noteContext?: NoteAIContext | null,
 ): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/transform/stream`, {
     method: 'POST',
     headers: await localAuthHeaders('json'),
-    body: JSON.stringify({ note_id: noteId, content, transform, tone, provider, model }),
+    body: JSON.stringify({
+      note_id: noteId,
+      content,
+      transform,
+      tone,
+      provider,
+      model,
+      note_context: noteContext,
+    }),
   });
 
   if (!res.ok || !res.body) {
     throw new Error('Unable to stream AI output.');
+  }
+
+  await consumeSseStream(res, onToken);
+}
+
+export async function streamCopilotChat(
+  payload: CopilotChatRequest,
+  onToken: (chunk: string) => void,
+): Promise<void> {
+  const res = await fetch(`${LOCAL_BASE_URL}/ai/copilot/chat/stream`, {
+    method: 'POST',
+    headers: await localAuthHeaders('json'),
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok || !res.body) {
+    throw new Error('Unable to stream copilot response.');
   }
 
   await consumeSseStream(res, onToken);
@@ -612,6 +643,11 @@ export async function transcribeAudioChunk(
   engine: TranscriptionEngine = 'whisper',
   segmentId?: number,
   model?: string,
+  options?: {
+    contextPreset?: NoteContextPreset | null;
+    contextText?: string | null;
+    sourceHint?: 'me' | 'other_audio' | 'unknown' | null;
+  },
 ): Promise<TranscriptionChunkResponse> {
   const formData = new FormData();
   const extension = audioExtensionFromMimeType(chunk.type);
@@ -623,6 +659,15 @@ export async function transcribeAudioChunk(
   }
   if (typeof model === 'string' && model.trim().length > 0) {
     formData.append('model', model.trim());
+  }
+  if (options?.contextPreset) {
+    formData.append('context_preset', options.contextPreset);
+  }
+  if (typeof options?.contextText === 'string' && options.contextText.trim().length > 0) {
+    formData.append('context_text', options.contextText.trim());
+  }
+  if (options?.sourceHint) {
+    formData.append('source_hint', options.sourceHint);
   }
 
   const accessToken = await getDesktopAccessToken();

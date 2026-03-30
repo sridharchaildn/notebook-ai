@@ -6,6 +6,8 @@ export type ThemeTokensVersion = 'v1';
 export type WorkspaceKind = 'desktop_local_only' | 'drive_shared';
 export type NoteKind = 'note' | 'transcript' | 'interview_assist';
 export type ContentFormat = 'plain_text' | 'markdown';
+export type NoteContextPreset = 'meeting' | 'podcast' | 'youtube' | 'custom';
+export type SourceHint = 'me' | 'other_audio' | 'unknown';
 export type SyncState = 'idle' | 'syncing' | 'needs_setup' | 'error';
 export type SyncPhase = 'idle' | 'preparing' | 'pulling' | 'merging' | 'pushing' | 'finalizing';
 export type ModelUseCase = 'copilot' | 'transcription';
@@ -19,6 +21,8 @@ export interface NoteFrontmatter {
   provider?: ProviderId;
   model?: string;
   folder_id?: string | null;
+  context_preset?: NoteContextPreset | null;
+  context_text?: string | null;
 }
 
 export interface ProviderConnection {
@@ -76,7 +80,7 @@ export interface MoveNoteRequest {
 export type AITransformType = 'summarize' | 'rewrite' | 'extract_action_items';
 
 export interface AIWorkflowSpec {
-  id: AITransformType | 'interview_turns' | 'interview_coach';
+  id: AITransformType | 'interview_turns' | 'interview_coach' | 'copilot_chat';
   label: string;
   output_mode: 'plain_text' | 'json' | 'sse_text';
   max_lines?: number;
@@ -89,6 +93,7 @@ export interface AITransformRequest {
   tone?: 'concise' | 'professional' | 'friendly' | 'actionable';
   provider?: ProviderId;
   model?: string;
+  note_context?: NoteAIContext | null;
 }
 
 export interface AITransformStreamEvent {
@@ -102,11 +107,19 @@ export interface InterviewTurn {
   id: string;
   role: InterviewRole;
   text: string;
+  source_hint?: SourceHint | null;
+}
+
+export interface TranscriptSegment {
+  id: string;
+  text: string;
+  source_hint: SourceHint;
 }
 
 export interface TranscriptSessionData {
   session_type: 'transcript';
   transcript: string;
+  segments?: TranscriptSegment[];
   last_updated_at?: string | null;
 }
 
@@ -127,6 +140,15 @@ export interface NoteDocument {
   content_format: ContentFormat;
   content: string;
   session?: NoteSessionData | null;
+}
+
+export interface NoteAIContext {
+  title: string;
+  tags: string[];
+  note_kind: NoteKind;
+  context_preset?: NoteContextPreset | null;
+  context_text?: string | null;
+  transcript_segments?: TranscriptSegment[];
 }
 
 export interface InterviewTurnsRequest {
@@ -151,6 +173,25 @@ export interface InterviewCoachRequest {
 }
 
 export interface InterviewCoachStreamEvent {
+  event: 'token' | 'complete' | 'error';
+  data: string;
+}
+
+export interface CopilotChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface CopilotChatRequest {
+  question: string;
+  content: string;
+  history: CopilotChatMessage[];
+  note_context?: NoteAIContext | null;
+  provider?: ProviderId;
+  model?: string;
+}
+
+export interface CopilotChatStreamEvent {
   event: 'token' | 'complete' | 'error';
   data: string;
 }

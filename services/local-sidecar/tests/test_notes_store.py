@@ -17,6 +17,8 @@ def test_structured_note_roundtrip(tmp_path: Path):
             tags=["planning", "q2"],
             provider="openai",
             model="gpt-4o-mini",
+            context_preset="custom",
+            context_text="Sprint planning doc",
         )
     )
 
@@ -28,6 +30,8 @@ def test_structured_note_roundtrip(tmp_path: Path):
             tags=["planning"],
             provider="openrouter",
             model="openai/gpt-4o-mini",
+            context_preset="meeting",
+            context_text="Review with design and engineering leads",
         ),
     )
 
@@ -40,6 +44,8 @@ def test_structured_note_roundtrip(tmp_path: Path):
     assert reloaded.content == "Updated body"
     assert reloaded.frontmatter.provider == "openrouter"
     assert reloaded.frontmatter.model == "openai/gpt-4o-mini"
+    assert reloaded.frontmatter.context_preset == "meeting"
+    assert reloaded.frontmatter.context_text == "Review with design and engineering leads"
     assert (tmp_path / "notes" / f"{created.frontmatter.id}.note.json").exists()
 
     search = store.list_notes(query="updated")
@@ -115,3 +121,34 @@ def test_folder_crud_and_move(tmp_path: Path):
 
     reloaded = store.list_notes()[0]
     assert reloaded.frontmatter.folder_id is None
+
+
+def test_transcript_segments_roundtrip(tmp_path: Path):
+    store = NoteStore(tmp_path / "notes")
+
+    created = store.create_note(
+        NoteCreateRequest(
+          title="Customer meeting",
+          content="Me:\nI can share the deck.\n\nOther audio:\nPlease send it tomorrow.",
+          tags=["meeting", "transcript"],
+          kind="transcript",
+          content_format="plain_text",
+          context_preset="meeting",
+          session={
+              "session_type": "transcript",
+              "transcript": "Me:\nI can share the deck.\n\nOther audio:\nPlease send it tomorrow.",
+              "segments": [
+                  {"id": "1", "text": "I can share the deck.", "source_hint": "me"},
+                  {"id": "2", "text": "Please send it tomorrow.", "source_hint": "other_audio"},
+              ],
+          },
+        )
+    )
+
+    reloaded = store.list_notes()[0]
+    assert reloaded.frontmatter.id == created.frontmatter.id
+    assert reloaded.frontmatter.context_preset == "meeting"
+    assert reloaded.session is not None
+    assert reloaded.session.session_type == "transcript"
+    assert len(reloaded.session.segments) == 2
+    assert reloaded.session.segments[0].source_hint == "me"

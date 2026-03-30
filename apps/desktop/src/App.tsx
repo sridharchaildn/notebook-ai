@@ -1,35 +1,48 @@
 import {
+  buildTranscriptFromSegments,
+  commitTag,
+  removeTag,
+  sourceHintLabel,
+} from './lib/noteMetadata';
+import type { NoteContextPreset } from '@notebook-ai/contracts';
+import {
   getInterviewSession,
   getTranscriptSession,
   isMarkdownNote,
   isTranscriptNote,
 } from '@notebook-ai/app-core';
 import type {
+  CopilotChatMessage,
   ContentFormat,
   DriveConnectionStatus,
   InterviewSessionData,
   InterviewTurn,
   LegalDocument,
   ModelUseCase,
+  NoteAIContext,
   NoteKind,
   NoteDocument,
+  SourceHint,
   ProviderConnection,
   ProviderId,
   ProviderModel,
   SupabaseSessionPayload,
   StoragePreference,
   SyncStatus,
+  TranscriptSegment,
   TranscriptSessionData,
 } from '@notebook-ai/contracts';
-import { ChevronRight, PanelLeftClose, PanelRightClose, Sparkles } from 'lucide-react';
+import { ChevronRight, Pencil, PanelLeftClose, PanelRightClose, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { AIActionPanel } from './components/AIActionPanel';
 import { LegalAcceptanceGate } from './components/LegalAcceptanceGate';
 import { MarkdownPreview } from './components/MarkdownPreview';
+import { NoteContextEditor } from './components/NoteContextEditor';
 import { NoteList } from './components/NoteList';
 import { SettingsModal } from './components/SettingsModal';
 import { SplashScreen } from './components/SplashScreen';
 import { SyncStatusBanner } from './components/SyncStatusBanner';
+import { TagEditor } from './components/TagEditor';
 import { TranscriptSessionView } from './components/TranscriptSessionView';
 import {
   TranscriptionPanel,
@@ -40,6 +53,7 @@ import {
   acceptLegalDocuments,
   authInvalidEventName,
   createNote,
+  deleteNote,
   getRendererSessionFallback,
   disconnectProvider,
   type DesktopRendererSession,
@@ -60,6 +74,7 @@ import {
   setLocalRoot,
   storeByok,
   openGoogleDriveConnect,
+  streamCopilotChat,
   streamInterviewCoach,
   streamTransform,
   transcribeAudioChunk,
@@ -76,6 +91,7 @@ import {
 } from './lib/supabaseAuth';
 
 const DEFAULT_BODY = 'Start typing...';
+const DELETE_UNDO_MS = 5000;
 const INTERVIEW_SEGMENT_MS = 8000;
 const INTERVIEW_RECOVERABLE_FAILURE_LIMIT = 2;
 const INTERVIEW_TRANSCRIPT_TAIL_CHARS = 5000;
@@ -103,6 +119,18 @@ const COPILOT_MODEL_STORAGE_KEY = 'notebook_copilot_model';
 const TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY = 'notebook_transcription_llm_provider';
 const TRANSCRIPTION_LLM_MODEL_STORAGE_KEY = 'notebook_transcription_llm_model';
 const TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY = 'notebook_transcription_whisper_model';
+
+interface PendingDeleteState {
+  note: NoteDocument;
+  index: number;
+}
+
+interface SourceRecorderHandle {
+  sourceHint: Extract<SourceHint, 'me' | 'other_audio'>;
+  recorder: MediaRecorder;
+  chunks: Blob[];
+  done: Promise<Blob>;
+}
 
 function readStoredProviderId(key: string, fallback: ProviderId): ProviderId {
   const raw = localStorage.getItem(key);
@@ -137,7 +165,10 @@ export default function App() {
   const [noteKind, setNoteKind] = useState<NoteKind>('note');
   const [contentFormat, setContentFormat] = useState<ContentFormat>('plain_text');
   const [showMarkdownSource, setShowMarkdownSource] = useState(false);
-  const [tags, setTags] = useState('');
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagDraft, setTagDraft] = useState('');
+  const [contextPreset, setContextPreset] = useState<NoteContextPreset>('custom');
+  const [contextText, setContextText] = useState('');
   const [search, setSearch] = useState('');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('notebook_theme');
@@ -190,6 +221,7 @@ export default function App() {
   const [providerDisconnecting, setProviderDisconnecting] = useState<ProviderId | null>(null);
   const [aiOutput, setAiOutput] = useState('');
   const [message, setMessage] = useState('Ready');
+  const [pendingDelete, setPendingDelete] = useState<PendingDeleteState | null>(null);
   const [recording, setRecording] = useState(false);
   const [transcriptionBusy, setTranscriptionBusy] = useState(false);
   const [transcriptionStatus, setTranscriptionStatus] = useState('Capture is idle');
@@ -200,6 +232,10 @@ export default function App() {
   const [interviewGuidance, setInterviewGuidance] = useState('');
   const [interviewGuidanceBusy, setInterviewGuidanceBusy] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  const [copilotChatDraft, setCopilotChatDraft] = useState('');
+  const [copilotChatHistory, setCopilotChatHistory] = useState<CopilotChatMessage[]>([]);
+  const [copilotChatBusy, setCopilotChatBusy] = useState(false);
   const [legalStage, setLegalStage] = useState<'checking' | 'needs_acceptance' | 'ready' | 'error'>('checking');
   const [legalDocuments, setLegalDocuments] = useState<LegalDocument[]>([]);
   const [legalBusy, setLegalBusy] = useState(false);
@@ -222,6 +258,7 @@ export default function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const micGainNodeRef = useRef<GainNode | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const pendingTitleFocusIdRef = useRef<string | null>(null);
   /** Buffered recorder chunks; merged and transcribed once on stop as a complete audio file. */
   const recordedAudioChunksRef = useRef<Blob[]>([]);
   const transcriptionEngineSessionRef = useRef<TranscriptionEngine>('whisper');
@@ -240,10 +277,13 @@ export default function App() {
   const lastCoachedInterviewerTurnIdRef = useRef<string | null>(null);
   const coachInFlightRequestIdRef = useRef(0);
   const interviewGuidanceRef = useRef('');
+  const transcriptSegmentsRef = useRef<TranscriptSegment[]>([]);
   const candidateMutedRef = useRef(false);
   const interviewThreadRef = useRef<HTMLDivElement | null>(null);
   const interviewBottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollInterviewRef = useRef(true);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const deleteUndoTimerRef = useRef<number | null>(null);
   const authCallbackInFlightRef = useRef<string | null>(null);
   const lastHandledAuthCallbackRef = useRef<string | null>(null);
   const driveConnectPollingRef = useRef(false);
@@ -368,6 +408,10 @@ export default function App() {
   useEffect(() => {
     interviewGuidanceRef.current = interviewGuidance;
   }, [interviewGuidance]);
+
+  useEffect(() => {
+    transcriptSegmentsRef.current = transcriptSegments;
+  }, [transcriptSegments]);
 
   useEffect(() => {
     interviewTurnsRef.current = interviewTurns;
@@ -608,11 +652,7 @@ export default function App() {
         const first = loadedNotes[0];
         if (first) {
           setSelectedId(first.frontmatter.id);
-          setTitle(first.frontmatter.title);
-          setBody(first.content);
-          setNoteKind(first.kind);
-          setContentFormat(first.content_format);
-          setTags(first.frontmatter.tags.join(', '));
+          applyEditorStateFromNote(first);
         } else {
           const created = await createNote({
             title: 'Welcome note',
@@ -620,14 +660,12 @@ export default function App() {
             tags: ['welcome'],
             kind: 'note',
             content_format: 'plain_text',
+            context_preset: 'custom',
+            context_text: '',
           });
           setNotes([created]);
           setSelectedId(created.frontmatter.id);
-          setTitle(created.frontmatter.title);
-          setBody(created.content);
-          setNoteKind(created.kind);
-          setContentFormat(created.content_format);
-          setTags(created.frontmatter.tags.join(', '));
+          applyEditorStateFromNote(created);
         }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Failed to initialize');
@@ -754,10 +792,14 @@ export default function App() {
     };
   }
 
-  function buildTranscriptSession(transcript: string): TranscriptSessionData {
+  function buildTranscriptSession(
+    transcript: string,
+    segments: TranscriptSegment[] = transcriptSegmentsRef.current,
+  ): TranscriptSessionData {
     return {
       session_type: 'transcript',
       transcript,
+      segments,
       last_updated_at: new Date().toISOString(),
     };
   }
@@ -783,10 +825,108 @@ export default function App() {
     }
 
     if (kind === 'transcript') {
-      return serializeExistingSessionForCompare(buildTranscriptSession(content));
+      return serializeExistingSessionForCompare(buildTranscriptSession(content, transcriptSegmentsRef.current));
     }
 
     return 'null';
+  }
+
+  function buildCurrentNoteContext(): NoteAIContext {
+    return {
+      title: title.trim() || 'Untitled note',
+      tags,
+      note_kind: noteKind,
+      context_preset: contextPreset,
+      context_text: contextText.trim() || null,
+      transcript_segments: noteKind === 'transcript' ? transcriptSegmentsRef.current : [],
+    };
+  }
+
+  function commitTagDraft() {
+    setTags((prev) => commitTag(prev, tagDraft));
+    setTagDraft('');
+  }
+
+  function focusTitleInput() {
+    window.requestAnimationFrame(() => {
+      const input = titleInputRef.current;
+      if (!input) return;
+      input.focus();
+      input.select();
+    });
+  }
+
+  function applyEditorStateFromNote(note: NoteDocument | null) {
+    if (!note) {
+      setTitle('');
+      setBody('');
+      setNoteKind('note');
+      setContentFormat('plain_text');
+      setTags([]);
+      setTagDraft('');
+      setContextPreset('custom');
+      setContextText('');
+      setTranscriptSegments([]);
+      setInterviewTranscript('');
+      setInterviewTurns([]);
+      setInterviewGuidance('');
+      setCopilotChatDraft('');
+      setCopilotChatHistory([]);
+      setAiOutput('');
+      return;
+    }
+
+    setTitle(note.frontmatter.title);
+    setBody(note.content);
+    setNoteKind(note.kind);
+    setContentFormat(note.content_format);
+    setShowMarkdownSource(false);
+    setTags(note.frontmatter.tags);
+    setTagDraft('');
+    setContextPreset(note.frontmatter.context_preset ?? 'custom');
+    setContextText(note.frontmatter.context_text ?? '');
+    setAiOutput('');
+    setCopilotChatDraft('');
+    setCopilotChatHistory([]);
+
+    if (note.kind === 'interview_assist') {
+      const session = getInterviewSession(note);
+      const transcript = session?.transcript ?? note.content;
+      const guidance = session?.guidance ?? '';
+      const turns = session?.turns ?? [];
+      interviewTranscriptRef.current = transcript;
+      interviewTurnsRef.current = turns;
+      interviewGuidanceRef.current = guidance;
+      setInterviewTranscript(transcript);
+      setInterviewTurns(turns);
+      setInterviewGuidance(guidance);
+      lastCoachedInterviewerTurnIdRef.current =
+        session?.last_coached_interviewer_turn_id ?? null;
+      setTranscriptSegments([]);
+      return;
+    }
+
+    if (note.kind === 'transcript') {
+      const session = getTranscriptSession(note);
+      const transcript = session?.transcript ?? note.content;
+      setBody(transcript);
+      setTranscriptSegments(session?.segments ?? []);
+      interviewTranscriptRef.current = '';
+      interviewTurnsRef.current = [];
+      interviewGuidanceRef.current = '';
+      setInterviewTranscript('');
+      setInterviewTurns([]);
+      setInterviewGuidance('');
+      return;
+    }
+
+    setTranscriptSegments([]);
+    interviewTranscriptRef.current = '';
+    interviewTurnsRef.current = [];
+    interviewGuidanceRef.current = '';
+    setInterviewTranscript('');
+    setInterviewTurns([]);
+    setInterviewGuidance('');
   }
 
   function buildTransformContent(currentNote: NoteDocument | null, currentContent: string) {
@@ -1072,6 +1212,11 @@ export default function App() {
         transcriptionEngine,
         segmentId,
         activeTranscriptionModel || undefined,
+        {
+          contextPreset,
+          contextText,
+          sourceHint: activeSessionMode === 'interview_assist' ? 'unknown' : null,
+        },
       );
       if (!result.ok) {
         const recoverableFailure = Boolean(result.recoverable);
@@ -1236,35 +1381,14 @@ export default function App() {
   }
 
   useEffect(() => {
+    applyEditorStateFromNote(selectedNote);
+  }, [selectedNote?.frontmatter.id]);
+
+  useEffect(() => {
     if (!selectedNote) return;
-    setTitle(selectedNote.frontmatter.title);
-    setBody(selectedNote.content);
-    setNoteKind(selectedNote.kind);
-    setContentFormat(selectedNote.content_format);
-    setShowMarkdownSource(false);
-    setTags(selectedNote.frontmatter.tags.join(', '));
-
-    if (selectedNote.kind === 'interview_assist') {
-      const session = getInterviewSession(selectedNote);
-      const transcript = session?.transcript ?? selectedNote.content;
-      const guidance = session?.guidance ?? '';
-      const turns = session?.turns ?? [];
-      interviewTranscriptRef.current = transcript;
-      interviewTurnsRef.current = turns;
-      interviewGuidanceRef.current = guidance;
-      setInterviewTranscript(transcript);
-      setInterviewTurns(turns);
-      setInterviewGuidance(guidance);
-      lastCoachedInterviewerTurnIdRef.current =
-        session?.last_coached_interviewer_turn_id ?? null;
-      return;
-    }
-
-    if (selectedNote.kind === 'transcript') {
-      const session = getTranscriptSession(selectedNote);
-      setBody(session?.transcript ?? selectedNote.content);
-      return;
-    }
+    if (pendingTitleFocusIdRef.current !== selectedNote.frontmatter.id) return;
+    pendingTitleFocusIdRef.current = null;
+    focusTitleInput();
   }, [selectedNote?.frontmatter.id]);
 
   useDebouncedEffect(
@@ -1278,12 +1402,11 @@ export default function App() {
         id: selectedId,
         title: title.trim() || 'Untitled note',
         content: noteKind === 'interview_assist' ? interviewTranscriptRef.current || body : body,
-        tags: tags
-          .split(',')
-          .map((tag) => tag.trim())
-          .filter(Boolean),
+        tags,
         kind: noteKind,
         content_format: contentFormat,
+        context_preset: contextPreset,
+        context_text: contextText.trim() || null,
         session:
           noteKind === 'interview_assist'
             ? buildInterviewSession(
@@ -1292,7 +1415,7 @@ export default function App() {
                 interviewTurnsRef.current,
               )
             : noteKind === 'transcript'
-              ? buildTranscriptSession(body)
+              ? buildTranscriptSession(body, transcriptSegmentsRef.current)
               : null,
       };
 
@@ -1302,6 +1425,8 @@ export default function App() {
         current.kind === payload.kind &&
         current.content_format === payload.content_format &&
         current.frontmatter.tags.join('|') === payload.tags.join('|') &&
+        (current.frontmatter.context_preset ?? null) === payload.context_preset &&
+        (current.frontmatter.context_text ?? null) === payload.context_text &&
         serializeExistingSessionForCompare(current.session ?? null) ===
           serializeSessionForCompare(noteKind, body);
 
@@ -1321,7 +1446,21 @@ export default function App() {
           setSaving(false);
         });
     },
-    [selectedId, title, body, tags, noteKind, contentFormat, notes, interviewTranscript, interviewGuidance, interviewTurns],
+    [
+      selectedId,
+      title,
+      body,
+      tags,
+      noteKind,
+      contentFormat,
+      contextPreset,
+      contextText,
+      notes,
+      interviewTranscript,
+      interviewGuidance,
+      interviewTurns,
+      transcriptSegments,
+    ],
     280,
   );
 
@@ -1333,10 +1472,13 @@ export default function App() {
         tags: [],
         kind: 'note',
         content_format: 'plain_text',
+        context_preset: contextPreset,
+        context_text: contextText.trim() || null,
       });
 
       setNotes((prev) => [created, ...prev]);
       setSelectedId(created.frontmatter.id);
+      applyEditorStateFromNote(created);
       setMessage('Created a new note');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Create failed');
@@ -1347,6 +1489,133 @@ export default function App() {
     setSearch(value);
     const loaded = await fetchNotes(value);
     setNotes(loaded);
+  }
+
+  function handleRenameNote(noteId?: string) {
+    if (noteId && noteId !== selectedId) {
+      pendingTitleFocusIdRef.current = noteId;
+      setSelectedId(noteId);
+      return;
+    }
+    focusTitleInput();
+  }
+
+  async function finalizePendingDelete(pending: PendingDeleteState) {
+    try {
+      await deleteNote(pending.note.frontmatter.id);
+      setMessage(`Deleted "${pending.note.frontmatter.title || 'Untitled note'}".`);
+    } catch (error) {
+      setNotes((prev) => {
+        const next = [...prev];
+        next.splice(Math.min(pending.index, next.length), 0, pending.note);
+        return next;
+      });
+      setSelectedId(pending.note.frontmatter.id);
+      applyEditorStateFromNote(pending.note);
+      setMessage(error instanceof Error ? error.message : 'Unable to delete note.');
+    } finally {
+      setPendingDelete((currentPending) =>
+        currentPending?.note.frontmatter.id === pending.note.frontmatter.id ? null : currentPending,
+      );
+      if (deleteUndoTimerRef.current !== null) {
+        window.clearTimeout(deleteUndoTimerRef.current);
+        deleteUndoTimerRef.current = null;
+      }
+    }
+  }
+
+  function handleDeleteNote(noteId: string) {
+    const targetIndex = notes.findIndex((note) => note.frontmatter.id === noteId);
+    if (targetIndex < 0) return;
+    const target = notes[targetIndex]!;
+
+    if (pendingDelete) {
+      void finalizePendingDelete(pendingDelete);
+    }
+
+    const remainingNotes = notes.filter((note) => note.frontmatter.id !== noteId);
+    setPendingDelete({ note: target, index: targetIndex });
+    setNotes(remainingNotes);
+
+    if (selectedId === noteId) {
+      const nextSelection = remainingNotes[targetIndex] ?? remainingNotes[targetIndex - 1] ?? null;
+      setSelectedId(nextSelection?.frontmatter.id ?? null);
+      applyEditorStateFromNote(nextSelection);
+    }
+
+    setMessage(`Deleted "${target.frontmatter.title || 'Untitled note'}". Undo?`);
+
+    if (deleteUndoTimerRef.current !== null) {
+      window.clearTimeout(deleteUndoTimerRef.current);
+    }
+    deleteUndoTimerRef.current = window.setTimeout(() => {
+      void finalizePendingDelete({ note: target, index: targetIndex });
+    }, DELETE_UNDO_MS);
+  }
+
+  function undoDeleteNote() {
+    if (!pendingDelete) return;
+    if (deleteUndoTimerRef.current !== null) {
+      window.clearTimeout(deleteUndoTimerRef.current);
+      deleteUndoTimerRef.current = null;
+    }
+    setNotes((prev) => {
+      const next = [...prev];
+      next.splice(Math.min(pendingDelete.index, next.length), 0, pendingDelete.note);
+      return next;
+    });
+    setSelectedId(pendingDelete.note.frontmatter.id);
+    applyEditorStateFromNote(pendingDelete.note);
+    setPendingDelete(null);
+    setMessage('Delete undone.');
+  }
+
+  async function runCopilotChat() {
+    if (!selectedId || !selectedNote || !copilotChatDraft.trim()) return;
+    if (!connectedProviders.includes(copilotProvider)) {
+      setMessage('Connect an AI provider in Settings before using Copilot chat.');
+      setSettingsOpen(true);
+      return;
+    }
+
+    const question = copilotChatDraft.trim();
+    const history: CopilotChatMessage[] = [
+      ...copilotChatHistory,
+      { role: 'user', content: question },
+      { role: 'assistant', content: '' },
+    ];
+    setCopilotChatHistory(history);
+    setCopilotChatDraft('');
+    setCopilotChatBusy(true);
+
+    let answer = '';
+    try {
+      await streamCopilotChat(
+        {
+          question,
+          content: buildTransformContent(selectedNote, body),
+          history: copilotChatHistory,
+          note_context: buildCurrentNoteContext(),
+          provider: copilotProvider,
+          model: copilotModel || undefined,
+        },
+        (token) => {
+          answer += token;
+          setCopilotChatHistory((prev) => {
+            const next = [...prev];
+            if (next.length === 0) return next;
+            next[next.length - 1] = { role: 'assistant', content: answer };
+            return next;
+          });
+        },
+      );
+      setMessage('Copilot response ready.');
+    } catch (error) {
+      setCopilotChatHistory((prev) => prev.filter((_, index) => index < prev.length - 1));
+      setMessage(error instanceof Error ? error.message : 'Copilot chat failed.');
+    } finally {
+      setCopilotChatBusy(false);
+    }
   }
 
   async function runTransform(action: 'summarize' | 'rewrite' | 'extract_action_items') {
@@ -1371,6 +1640,7 @@ export default function App() {
         'concise',
         copilotProvider,
         copilotModel || undefined,
+        buildCurrentNoteContext(),
       );
       setMessage('AI transform complete');
     } catch (error) {
@@ -1870,6 +2140,30 @@ export default function App() {
       : new MediaRecorder(inputStream);
   }
 
+  function createSourceRecorderHandle(
+    sourceHint: Extract<SourceHint, 'me' | 'other_audio'>,
+    inputStream: MediaStream,
+  ): SourceRecorderHandle {
+    const recorder = buildAudioRecorder(inputStream);
+    const chunks: Blob[] = [];
+    let resolveDone: ((blob: Blob) => void) | null = null;
+    const done = new Promise<Blob>((resolve) => {
+      resolveDone = resolve;
+    });
+
+    recorder.ondataavailable = (event) => {
+      if (!event.data || event.data.size === 0) return;
+      chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      const mimeType = recorder.mimeType || 'audio/webm';
+      const blob = chunks.length <= 1 ? chunks[0] ?? new Blob([], { type: mimeType }) : new Blob(chunks, { type: mimeType });
+      resolveDone?.(blob);
+    };
+
+    return { sourceHint, recorder, chunks, done };
+  }
+
   async function beginTranscriptionSession(
     recorder: MediaRecorder,
     options: {
@@ -1877,9 +2171,18 @@ export default function App() {
       shareStream: MediaStream | null;
       transcriptionEngine: TranscriptionEngine;
       sessionMode: CaptureSessionMode;
+      sourceRecorderHandles?: SourceRecorderHandle[];
+      mixedSources?: boolean;
     },
   ) {
-    const { listeningStatus, shareStream, transcriptionEngine, sessionMode } = options;
+    const {
+      listeningStatus,
+      shareStream,
+      transcriptionEngine,
+      sessionMode,
+      sourceRecorderHandles = [],
+      mixedSources = false,
+    } = options;
 
     recorderRef.current = recorder;
     transcriptionEngineSessionRef.current = transcriptionEngine;
@@ -1905,6 +2208,7 @@ export default function App() {
     setInterviewTurns([]);
     setInterviewGuidance('');
     setInterviewGuidanceBusy(false);
+    setTranscriptSegments([]);
 
     const transcriptTitle =
       sessionMode === 'interview_assist'
@@ -1917,18 +2221,16 @@ export default function App() {
       tags: sessionMode === 'interview_assist' ? ['interview-assist', 'transcript'] : ['transcript'],
       kind: sessionMode === 'interview_assist' ? 'interview_assist' : 'transcript',
       content_format: 'plain_text',
+      context_preset: contextPreset,
+      context_text: contextText.trim() || null,
       session:
         sessionMode === 'interview_assist'
           ? buildInterviewSession('', '', [])
-          : buildTranscriptSession(''),
+          : buildTranscriptSession('', []),
     });
     setNotes((prev) => [created, ...prev]);
     setSelectedId(created.frontmatter.id);
-    setTitle(created.frontmatter.title);
-    setBody(initialBody);
-    setNoteKind(created.kind);
-    setContentFormat(created.content_format);
-    setTags(created.frontmatter.tags.join(', '));
+    applyEditorStateFromNote(created);
 
     setRecording(true);
     setTranscriptionStatus(listeningStatus);
@@ -1971,14 +2273,83 @@ export default function App() {
             : 'Transcribing final recording (Fast mode)...',
         );
 
+        for (const handle of sourceRecorderHandles) {
+          if (handle.recorder.state === 'recording') {
+            try {
+              handle.recorder.requestData();
+            } catch {
+              /* ignore */
+            }
+            handle.recorder.stop();
+          }
+        }
+
         void transcribeAudioChunk(
           merged,
           activeTranscriptionProvider,
           transcriptionEngine,
           undefined,
           activeTranscriptionModel || undefined,
+          {
+            contextPreset: contextPreset,
+            contextText,
+            sourceHint:
+              sourceRecorderHandles.length === 0
+                ? (mixedSources ? 'unknown' : shareStream ? 'other_audio' : 'me')
+                : 'unknown',
+          },
         )
-          .then((result) => {
+          .then(async (result) => {
+            let nextSegments: TranscriptSegment[] = [];
+            if (contextPreset === 'meeting' && sourceRecorderHandles.length > 0) {
+              const segmentResults = await Promise.all(
+                sourceRecorderHandles.map(async (handle, index) => {
+                  const sourceBlob = await handle.done;
+                  if (sourceBlob.size === 0) return null;
+                  const sourceResult = await transcribeAudioChunk(
+                    sourceBlob,
+                    activeTranscriptionProvider,
+                    transcriptionEngine,
+                    undefined,
+                    activeTranscriptionModel || undefined,
+                    {
+                      contextPreset,
+                      contextText,
+                      sourceHint: handle.sourceHint,
+                    },
+                  );
+                  const text = sourceResult.text.trim();
+                  if (!text) return null;
+                  return {
+                    id: `segment-${index + 1}-${handle.sourceHint}`,
+                    text,
+                    source_hint: handle.sourceHint,
+                  } satisfies TranscriptSegment;
+                }),
+              );
+              nextSegments = segmentResults.filter(
+                (segment): segment is NonNullable<typeof segment> => segment !== null,
+              );
+            } else if (contextPreset === 'meeting' && result.text.trim()) {
+              nextSegments = [
+                {
+                  id: 'segment-1',
+                  text: result.text.trim(),
+                  source_hint: shareStream ? 'other_audio' : 'me',
+                },
+              ];
+            }
+
+            if (nextSegments.length > 0) {
+              const transcriptText = buildTranscriptFromSegments(nextSegments, result.text);
+              setTranscriptSegments(nextSegments);
+              setBody(transcriptText);
+              setTranscriptionStatus(
+                `Done (${result.provider} / ${result.model}). Capture stopped.`,
+              );
+              return;
+            }
+
             if (result.text.trim()) {
               appendTranscriptChunk(result.text);
               setTranscriptionStatus(
@@ -2021,6 +2392,9 @@ export default function App() {
       micTrack?.addEventListener('ended', endOnStop);
     }
 
+    for (const handle of sourceRecorderHandles) {
+      handle.recorder.start();
+    }
     recorder.start();
     if (sessionMode === 'interview_assist') {
       scheduleInterviewSegmentRollover();
@@ -2070,6 +2444,7 @@ export default function App() {
           shareStream: null,
           transcriptionEngine,
           sessionMode,
+          mixedSources: false,
         });
       } catch (error) {
         stopCaptureTracks();
@@ -2127,6 +2502,13 @@ export default function App() {
       }
 
       const mixedAudioStream = destination.stream;
+      const sourceRecorderHandles: SourceRecorderHandle[] =
+        sessionMode === 'notes' && contextPreset === 'meeting' && micEnabled
+          ? [
+              createSourceRecorderHandle('other_audio', systemAudioStream),
+              ...(micStream ? [createSourceRecorderHandle('me', micStream)] : []),
+            ]
+          : [];
 
       captureStreamRef.current = captureStream;
       audioStreamRef.current = mixedAudioStream;
@@ -2147,6 +2529,8 @@ export default function App() {
         shareStream: captureStream,
         transcriptionEngine,
         sessionMode,
+        sourceRecorderHandles,
+        mixedSources: micEnabled,
       });
     } catch (error) {
       stopCaptureTracks();
@@ -2160,6 +2544,9 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      if (deleteUndoTimerRef.current !== null) {
+        window.clearTimeout(deleteUndoTimerRef.current);
+      }
       stopCaptureTracks();
     };
   }, []);
@@ -2224,6 +2611,10 @@ export default function App() {
   const showTranscriptNoteView = isTranscriptNote(selectedNote);
   const showMarkdownPreview = isMarkdownNote(selectedNote) && !showMarkdownSource;
   const transcriptViewText = getTranscriptSession(selectedNote)?.transcript ?? body;
+  const transcriptViewSegments = selectedNote?.frontmatter.id === selectedId
+    ? transcriptSegments
+    : (getTranscriptSession(selectedNote)?.segments ?? []);
+  const showCopilotChat = showTranscriptNoteView || showInterviewNoteView;
 
   return (
     <main className={`app-shell${isMacPlatform ? ' is-mac' : ''}`} style={{ gridTemplateColumns: gridCols }}>
@@ -2248,6 +2639,8 @@ export default function App() {
           onLogout={() => {
             void handleLogout();
           }}
+          onRenameNote={handleRenameNote}
+          onDeleteNote={handleDeleteNote}
           logoutBusy={logoutBusy}
         />
       ) : (
@@ -2260,35 +2653,74 @@ export default function App() {
 
       {/* Editor */}
       <section className="editor-panel">
-        <header className="editor-header">
-          <div className="title-wrap">
-            <input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              className="title-input"
-              placeholder="Untitled note"
-            />
-            <input
-              value={tags}
-              onChange={(event) => setTags(event.target.value)}
-              className="tags-input"
-              placeholder="tags, comma-separated"
-            />
-          </div>
+        {selectedNote ? (
+          <header className="editor-header">
+            <div className="title-wrap">
+              <input
+                ref={titleInputRef}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                className="title-input"
+                placeholder="Untitled note"
+              />
+              <TagEditor
+                tags={tags}
+                draftValue={tagDraft}
+                onDraftChange={setTagDraft}
+                onCommitDraft={commitTagDraft}
+                onRemoveTag={(tag) => setTags((prev) => removeTag(prev, tag))}
+                onRemoveLastTag={() =>
+                  setTags((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev))
+                }
+              />
+              <NoteContextEditor
+                preset={contextPreset}
+                text={contextText}
+                onPresetChange={setContextPreset}
+                onTextChange={setContextText}
+              />
+            </div>
 
-          <div className="header-right">
-            {isMarkdownNote(selectedNote) ? (
-              <button
-                type="button"
-                className="ghost-btn"
-                onClick={() => setShowMarkdownSource((prev) => !prev)}
-              >
-                {showMarkdownSource ? 'Preview markdown' : 'Show source'}
-              </button>
-            ) : null}
-            <span className="status-pill">{saving ? 'Saving...' : message}</span>
-          </div>
-        </header>
+            <div className="header-right">
+              <div className="editor-header__actions">
+                <button type="button" className="ghost-btn" onClick={() => handleRenameNote()}>
+                  <Pencil size={14} />
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  className="ghost-btn danger-soft"
+                  onClick={() => handleDeleteNote(selectedNote.frontmatter.id)}
+                >
+                  <Trash2 size={14} />
+                  Delete
+                </button>
+                {isMarkdownNote(selectedNote) ? (
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => setShowMarkdownSource((prev) => !prev)}
+                  >
+                    {showMarkdownSource ? 'Preview markdown' : 'Show source'}
+                  </button>
+                ) : null}
+              </div>
+              <span className="status-pill">{saving ? 'Saving...' : message}</span>
+            </div>
+          </header>
+        ) : (
+          <header className="editor-header editor-header--empty">
+            <div className="title-wrap">
+              <h2 className="editor-empty-title">No note selected</h2>
+              <p className="editor-empty-copy">
+                Create a note or start a recording to open a new transcript.
+              </p>
+            </div>
+            <div className="header-right">
+              <span className="status-pill">{message}</span>
+            </div>
+          </header>
+        )}
 
         {storagePreference.mode === 'local_and_drive' ? (
           <div className="sync-banner-wrap">
@@ -2313,7 +2745,31 @@ export default function App() {
           />
         </div>
 
-        {showInterviewNoteView ? (
+        {!selectedNote ? (
+          <section className="note-empty-panel">
+            <h3>No note selected</h3>
+            <p>Create a new note, open an existing one, or start recording to capture a transcript.</p>
+            <div className="note-empty-panel__context">
+              <h4>Next recording context</h4>
+              <p>Set this before you start a transcript so Copilot and summaries know what the audio is about.</p>
+              <NoteContextEditor
+                preset={contextPreset}
+                text={contextText}
+                onPresetChange={setContextPreset}
+                onTextChange={setContextText}
+              />
+            </div>
+            <button
+              type="button"
+              className="solid-btn"
+              onClick={() => {
+                void handleCreateNote();
+              }}
+            >
+              Create Note
+            </button>
+          </section>
+        ) : showInterviewNoteView ? (
           <section className="interview-chat-screen" aria-live="polite">
             <header className="interview-chat-header">
               <h3>Interview Conversation</h3>
@@ -2412,7 +2868,12 @@ export default function App() {
             </div>
           </section>
         ) : showTranscriptNoteView ? (
-          <TranscriptSessionView transcript={transcriptViewText} />
+          <TranscriptSessionView
+            transcript={transcriptViewText}
+            segments={transcriptViewSegments}
+            contextPreset={contextPreset}
+            contextText={contextText}
+          />
         ) : showMarkdownPreview ? (
           <section className="note-preview-panel">
             <header className="note-preview-panel__header">
@@ -2439,7 +2900,23 @@ export default function App() {
               <PanelRightClose size={16} />
             </button>
           </div>
-          <AIActionPanel output={aiOutput} running={busy} onRun={(action) => void runTransform(action)} />
+          <AIActionPanel
+            output={aiOutput}
+            running={busy}
+            onRun={(action) => void runTransform(action)}
+            transcriptChatEnabled={showCopilotChat}
+            chatDraft={copilotChatDraft}
+            chatHistory={copilotChatHistory}
+            chatBusy={copilotChatBusy}
+            onChatDraftChange={setCopilotChatDraft}
+            onSendChat={() => {
+              void runCopilotChat();
+            }}
+            onClearChat={() => {
+              setCopilotChatHistory([]);
+              setCopilotChatDraft('');
+            }}
+          />
         </aside>
       ) : (
         <div className="collapsed-rail">
@@ -2449,6 +2926,15 @@ export default function App() {
           </button>
         </div>
       )}
+
+      {pendingDelete ? (
+        <div className="undo-toast" role="status" aria-live="polite">
+          <span>{pendingDelete.note.frontmatter.title || 'Untitled note'} deleted.</span>
+          <button type="button" className="ghost-btn" onClick={undoDeleteNote}>
+            Undo
+          </button>
+        </div>
+      ) : null}
 
       <SettingsModal
         open={settingsOpen}

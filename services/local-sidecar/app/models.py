@@ -11,6 +11,8 @@ ToneType = Literal["concise", "professional", "friendly", "actionable"]
 InterviewRole = Literal["interviewer", "interviewee"]
 NoteKind = Literal["note", "transcript", "interview_assist"]
 ContentFormat = Literal["plain_text", "markdown"]
+NoteContextPreset = Literal["meeting", "podcast", "youtube", "custom"]
+SourceHint = Literal["me", "other_audio", "unknown"]
 WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
 SyncState = Literal["idle", "syncing", "needs_setup", "error"]
 SyncPhase = Literal["idle", "preparing", "pulling", "merging", "pushing", "finalizing"]
@@ -32,17 +34,27 @@ class NoteFrontmatter(BaseModel):
     provider: ProviderId | None = None
     model: str | None = None
     folder_id: str | None = None
+    context_preset: NoteContextPreset | None = None
+    context_text: str | None = None
 
 
 class InterviewTurn(BaseModel):
     id: str
     role: InterviewRole
     text: str
+    source_hint: SourceHint | None = None
+
+
+class TranscriptSegment(BaseModel):
+    id: str
+    text: str
+    source_hint: SourceHint = "unknown"
 
 
 class TranscriptSessionData(BaseModel):
     session_type: Literal["transcript"] = "transcript"
     transcript: str = ""
+    segments: list[TranscriptSegment] = Field(default_factory=list)
     last_updated_at: datetime | None = None
 
 
@@ -77,6 +89,8 @@ class NoteCreateRequest(BaseModel):
     provider: ProviderId | None = None
     model: str | None = None
     folder_id: str | None = None
+    context_preset: NoteContextPreset | None = None
+    context_text: str | None = None
     kind: NoteKind = "note"
     content_format: ContentFormat = "plain_text"
     session: NoteSessionData | None = None
@@ -96,6 +110,8 @@ class NoteUpdateRequest(BaseModel):
     provider: ProviderId | None = None
     model: str | None = None
     folder_id: str | None = None
+    context_preset: NoteContextPreset | None = None
+    context_text: str | None = None
     kind: NoteKind = "note"
     content_format: ContentFormat = "plain_text"
     session: NoteSessionData | None = None
@@ -111,6 +127,15 @@ class MoveNoteRequest(BaseModel):
     folder_id: str | None = None
 
 
+class NoteAIContext(BaseModel):
+    title: str
+    tags: list[str] = Field(default_factory=list)
+    note_kind: NoteKind = "note"
+    context_preset: NoteContextPreset | None = None
+    context_text: str | None = None
+    transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
+
+
 class AITransformRequest(BaseModel):
     note_id: str | None = None
     content: str
@@ -118,6 +143,7 @@ class AITransformRequest(BaseModel):
     tone: ToneType = "concise"
     provider: ProviderId | None = None
     model: str | None = None
+    note_context: NoteAIContext | None = None
 
 
 class InterviewAssistRequest(BaseModel):
@@ -143,6 +169,20 @@ class InterviewCoachRequest(BaseModel):
     latest_interviewer_turn: InterviewTurn
     latest_interviewee_turn: InterviewTurn | None = None
     brevity: Literal["short", "one_liner"] = "short"
+    provider: ProviderId | None = None
+    model: str | None = None
+
+
+class CopilotChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class CopilotChatRequest(BaseModel):
+    question: str
+    content: str
+    history: list[CopilotChatMessage] = Field(default_factory=list)
+    note_context: NoteAIContext | None = None
     provider: ProviderId | None = None
     model: str | None = None
 

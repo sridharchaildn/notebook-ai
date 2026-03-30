@@ -27,10 +27,17 @@ def test_notes_crud_and_provider_status(tmp_path):
 
     updated = client.put(
         f"/notes/{note_id}",
-        json={"title": "Design Ideas v2", "content": "Ship quickly", "tags": ["mvp"]},
+        json={
+            "title": "Design Ideas v2",
+            "content": "Ship quickly",
+            "tags": ["mvp"],
+            "context_preset": "custom",
+            "context_text": "Launch workstream",
+        },
     )
     assert updated.status_code == 200
     assert updated.json()["frontmatter"]["title"] == "Design Ideas v2"
+    assert updated.json()["frontmatter"]["context_preset"] == "custom"
 
     cached = client.post(
         "/providers/status/cache",
@@ -88,6 +95,39 @@ def test_stream_transform_sse(tmp_path):
 
     assert response.status_code == 200
     assert "data:" in response.text
+    assert "token" in response.text
+    assert "complete" in response.text
+
+
+def test_copilot_chat_stream(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/ai/copilot/chat/stream",
+        json={
+            "question": "What did I commit to?",
+            "content": "Me: I can send the deck tomorrow.\nOther audio: Please share the revised plan.",
+            "history": [],
+            "note_context": {
+                "title": "Customer meeting",
+                "tags": ["meeting", "transcript"],
+                "note_kind": "transcript",
+                "context_preset": "meeting",
+                "transcript_segments": [
+                    {"id": "1", "text": "I can send the deck tomorrow.", "source_hint": "me"}
+                ],
+            },
+            "provider": "openai",
+        },
+    )
+
+    assert response.status_code == 200
     assert "token" in response.text
     assert "complete" in response.text
 
