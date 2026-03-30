@@ -148,6 +148,7 @@ def test_transcription_chunk_returns_structured_error_fields(tmp_path):
             "provider": "openai",
             "transcription_mode": "whisper",
             "segment_id": "7",
+            "model": "whisper-1",
         },
         files={"file": ("chunk.webm", b"fake audio bytes", "audio/webm")},
     )
@@ -163,6 +164,7 @@ def test_transcription_chunk_returns_structured_error_fields(tmp_path):
     }
     assert "recoverable" in payload
     assert payload["segment_id"] == 7
+    assert payload["model"] == "whisper-1"
 
 
 def test_storage_and_folder_endpoints(tmp_path):

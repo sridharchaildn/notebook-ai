@@ -317,6 +317,7 @@ def create_app(
         provider: str = Form(default="openai"),
         transcription_mode: str = Form(default="whisper"),
         segment_id: int | None = Form(default=None),
+        model: str | None = Form(default=None),
         authorization: str | None = Header(default=None),
     ) -> TranscriptionChunkResponse:
         audio_bytes = await file.read()
@@ -341,6 +342,7 @@ def create_app(
             provider=provider,
             transcription_mode=mode,
             segment_id=segment_id,
+            model=model,
             access_token=_bearer_token_from_header(authorization),
         )
 

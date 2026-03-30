@@ -9,6 +9,7 @@ ProviderId = Literal["openai", "openrouter"]
 StorageMode = Literal["local", "local_and_drive"]
 LegalDocumentType = Literal["privacy_policy", "user_agreement"]
 WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
+ModelUseCase = Literal["copilot", "transcription"]
 
 
 class AuthenticatedUser(BaseModel):
@@ -53,6 +54,15 @@ class ProviderStatus(BaseModel):
     connected: bool
     via: Literal["oauth", "api_key", "none"]
     last_updated_at: datetime | None = None
+
+
+class ProviderModel(BaseModel):
+    id: str
+    label: str
+    provider: ProviderId
+    owned_by: str | None = None
+    context_length: int | None = None
+    supports_audio_input: bool | None = None
 
 
 class ProviderDeleteResponse(BaseModel):

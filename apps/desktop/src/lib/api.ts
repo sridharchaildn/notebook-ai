@@ -10,6 +10,7 @@ import type {
   InterviewTurnsResponse,
   LegalAcceptanceRecord,
   LegalDocument,
+  ModelUseCase,
   MoveNoteRequest,
   NoteDocument,
   NoteKind,
@@ -17,6 +18,7 @@ import type {
   OAuthStartResponse,
   ProviderConnection,
   ProviderId,
+  ProviderModel,
   StoragePreference,
   SyncStatus,
   TranscriptionChunkResponse,
@@ -464,6 +466,18 @@ export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
   return Array.from(merged.values());
 }
 
+export async function fetchProviderModels(
+  provider: ProviderId,
+  useCase: ModelUseCase,
+): Promise<ProviderModel[]> {
+  const response = await cloudFetch(
+    `/providers/models?provider=${encodeURIComponent(provider)}&use_case=${encodeURIComponent(useCase)}`,
+    { headers: await authorizedCloudHeaders('none') },
+    'Unable to load provider models.',
+  );
+  return (await response.json()) as ProviderModel[];
+}
+
 export async function storeByok(provider: ProviderId, apiKey: string): Promise<void> {
   await cloudFetch(
     '/providers/byok',
@@ -513,11 +527,13 @@ export async function streamTransform(
   transform: AITransformType,
   onToken: (chunk: string) => void,
   tone: AITransformRequest['tone'] = 'concise',
+  provider?: ProviderId,
+  model?: string,
 ): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/transform/stream`, {
     method: 'POST',
     headers: await localAuthHeaders('json'),
-    body: JSON.stringify({ note_id: noteId, content, transform, tone }),
+    body: JSON.stringify({ note_id: noteId, content, transform, tone, provider, model }),
   });
 
   if (!res.ok || !res.body) {
@@ -595,6 +611,7 @@ export async function transcribeAudioChunk(
   provider: ProviderId = 'openai',
   engine: TranscriptionEngine = 'whisper',
   segmentId?: number,
+  model?: string,
 ): Promise<TranscriptionChunkResponse> {
   const formData = new FormData();
   const extension = audioExtensionFromMimeType(chunk.type);
@@ -603,6 +620,9 @@ export async function transcribeAudioChunk(
   formData.append('transcription_mode', engine);
   if (typeof segmentId === 'number') {
     formData.append('segment_id', String(segmentId));
+  }
+  if (typeof model === 'string' && model.trim().length > 0) {
+    formData.append('model', model.trim());
   }
 
   const accessToken = await getDesktopAccessToken();

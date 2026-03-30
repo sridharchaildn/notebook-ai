@@ -8,6 +8,7 @@ export type NoteKind = 'note' | 'transcript' | 'interview_assist';
 export type ContentFormat = 'plain_text' | 'markdown';
 export type SyncState = 'idle' | 'syncing' | 'needs_setup' | 'error';
 export type SyncPhase = 'idle' | 'preparing' | 'pulling' | 'merging' | 'pushing' | 'finalizing';
+export type ModelUseCase = 'copilot' | 'transcription';
 
 export interface NoteFrontmatter {
   id: string;
@@ -34,6 +35,15 @@ export interface ProviderCapability {
   supports_oauth: boolean;
   supports_api_key: boolean;
   preferred_for?: Array<'notes' | 'interview' | 'transcription'>;
+}
+
+export interface ProviderModel {
+  id: string;
+  label: string;
+  provider: ProviderId;
+  owned_by?: string | null;
+  context_length?: number | null;
+  supports_audio_input?: boolean | null;
 }
 
 export interface StoragePreference {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -11,10 +12,16 @@ from app.security import MemoryAuthGateway, decrypt_secret
 from app.storage import MemoryStore
 
 
-def _build_test_app() -> tuple[TestClient, MemoryStore, MemoryAuthGateway, SupabaseSessionPayload]:
+def _build_test_app(
+    provider_transport: httpx.AsyncBaseTransport | None = None,
+) -> tuple[TestClient, MemoryStore, MemoryAuthGateway, SupabaseSessionPayload]:
     settings = Settings(
         credential_secret="vault-secret",
         openai_oauth_client_id="client-test",
+        openai_oauth_token_url=None,
+        google_drive_oauth_token_url=None,
+        google_drive_client_id=None,
+        google_drive_client_secret=None,
     )
     store = MemoryStore()
     user = AuthenticatedUser(id="user-a", email="user@example.com")
@@ -30,7 +37,14 @@ def _build_test_app() -> tuple[TestClient, MemoryStore, MemoryAuthGateway, Supab
         users_by_access_token={session.access_token: user},
         sessions_by_refresh_token={session.refresh_token: session},
     )
-    client = TestClient(create_app(settings, store=store, auth_gateway=auth))
+    client = TestClient(
+        create_app(
+            settings,
+            store=store,
+            auth_gateway=auth,
+            provider_transport=provider_transport,
+        )
+    )
     return client, store, auth, session
 
 
@@ -175,3 +189,81 @@ def test_legal_storage_and_drive_status():
     assert workspace.json()["kind"] == "drive_shared"
     assert workspace.json()["storage_mode"] == "local_and_drive"
     assert workspace.json()["drive_folder_id"] == "folder-2"
+
+
+def test_openai_provider_models_filters_copilot_models():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://api.openai.com/v1/models")
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "gpt-4o-mini", "owned_by": "openai"},
+                    {"id": "gpt-4o-mini-transcribe", "owned_by": "openai"},
+                    {"id": "text-embedding-3-small", "owned_by": "openai"},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client, _store, _auth, session = _build_test_app(provider_transport=transport)
+    saved = client.post(
+        "/providers/byok",
+        headers=_auth_headers(session),
+        json={"provider": "openai", "api_key": "sk-test-123"},
+    )
+    assert saved.status_code == 200
+
+    response = client.get(
+        "/providers/models",
+        headers=_auth_headers(session),
+        params={"provider": "openai", "use_case": "copilot"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload] == ["gpt-4o-mini"]
+
+
+def test_openrouter_provider_models_filter_transcription_capable_models():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://openrouter.ai/api/v1/models")
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "openai/gpt-4o-audio-preview",
+                        "name": "GPT-4o Audio",
+                        "top_provider": "openai",
+                        "context_length": 128000,
+                        "architecture": {"input_modalities": ["text", "audio"]},
+                    },
+                    {
+                        "id": "openai/gpt-4.1-mini",
+                        "name": "GPT-4.1 mini",
+                        "top_provider": "openai",
+                        "context_length": 128000,
+                        "architecture": {"input_modalities": ["text"]},
+                    },
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client, _store, _auth, session = _build_test_app(provider_transport=transport)
+    saved = client.post(
+        "/providers/byok",
+        headers=_auth_headers(session),
+        json={"provider": "openrouter", "api_key": "sk-or-test-123"},
+    )
+    assert saved.status_code == 200
+
+    response = client.get(
+        "/providers/models",
+        headers=_auth_headers(session),
+        params={"provider": "openrouter", "use_case": "transcription"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload] == ["openai/gpt-4o-audio-preview"]
+    assert payload[0]["supports_audio_input"] is True

@@ -10,9 +10,12 @@ import type {
   InterviewSessionData,
   InterviewTurn,
   LegalDocument,
+  ModelUseCase,
   NoteKind,
   NoteDocument,
+  ProviderConnection,
   ProviderId,
+  ProviderModel,
   SupabaseSessionPayload,
   StoragePreference,
   SyncStatus,
@@ -40,6 +43,7 @@ import {
   getRendererSessionFallback,
   disconnectProvider,
   type DesktopRendererSession,
+  fetchProviderModels,
   fetchInterviewTurns,
   fetchLegalAcceptances,
   fetchLegalDocuments,
@@ -94,6 +98,20 @@ const INTERVIEW_FILLER_UTTERANCES = new Set([
   'thank you',
 ]);
 const MAIN_AUTH_SESSION_EVENT = 'notebook:main-auth-session';
+const COPILOT_PROVIDER_STORAGE_KEY = 'notebook_copilot_provider';
+const COPILOT_MODEL_STORAGE_KEY = 'notebook_copilot_model';
+const TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY = 'notebook_transcription_llm_provider';
+const TRANSCRIPTION_LLM_MODEL_STORAGE_KEY = 'notebook_transcription_llm_model';
+const TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY = 'notebook_transcription_whisper_model';
+
+function readStoredProviderId(key: string, fallback: ProviderId): ProviderId {
+  const raw = localStorage.getItem(key);
+  return raw === 'openai' || raw === 'openrouter' ? raw : fallback;
+}
+
+function readStoredString(key: string): string {
+  return localStorage.getItem(key)?.trim() ?? '';
+}
 
 function useDebouncedEffect(effect: () => void, deps: unknown[], delay: number) {
   const cleanupRef = useRef<void | (() => void)>();
@@ -126,14 +144,23 @@ export default function App() {
     if (saved === 'light' || saved === 'dark') return saved;
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
-  const [providers, setProviders] = useState<
-    Array<{
-      provider: 'openai' | 'openrouter';
-      connected: boolean;
-      via: 'oauth' | 'api_key' | 'none';
-      last_updated_at?: string;
-    }>
-  >([]);
+  const [providers, setProviders] = useState<ProviderConnection[]>([]);
+  const [copilotProvider, setCopilotProvider] = useState<ProviderId>(() =>
+    readStoredProviderId(COPILOT_PROVIDER_STORAGE_KEY, 'openai'),
+  );
+  const [copilotModel, setCopilotModel] = useState(() => readStoredString(COPILOT_MODEL_STORAGE_KEY));
+  const [llmTranscriptionProvider, setLlmTranscriptionProvider] = useState<ProviderId>(() =>
+    readStoredProviderId(TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY, 'openai'),
+  );
+  const [llmTranscriptionModel, setLlmTranscriptionModel] = useState(() =>
+    readStoredString(TRANSCRIPTION_LLM_MODEL_STORAGE_KEY),
+  );
+  const [whisperTranscriptionModel, setWhisperTranscriptionModel] = useState(() =>
+    readStoredString(TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY),
+  );
+  const [providerModels, setProviderModels] = useState<Record<string, ProviderModel[]>>({});
+  const [providerModelsLoading, setProviderModelsLoading] = useState<Record<string, boolean>>({});
+  const [providerModelsError, setProviderModelsError] = useState<Record<string, string>>({});
   const [byokProvider, setByokProvider] = useState<'openai' | 'openrouter'>('openai');
   const [byokValue, setByokValue] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -231,10 +258,112 @@ export default function App() {
     setMessage(session?.userId ? 'Signed in. Checking legal requirements...' : 'Ready');
   }
 
+  const selectedNote = useMemo(
+    () => notes.find((note) => note.frontmatter.id === selectedId) ?? null,
+    [notes, selectedId],
+  );
+  const connectedProviders = useMemo(
+    () => providers.filter((entry) => entry.connected).map((entry) => entry.provider),
+    [providers],
+  );
+  const activeTranscriptionProvider: ProviderId =
+    transcriptionEngine === 'whisper' ? 'openai' : llmTranscriptionProvider;
+  const activeTranscriptionModel =
+    transcriptionEngine === 'whisper' ? whisperTranscriptionModel : llmTranscriptionModel;
+  const copilotModelCacheKey = `${copilotProvider}:copilot`;
+  const transcriptionModelCacheKey = `${activeTranscriptionProvider}:transcription`;
+  const copilotModelOptions = connectedProviders.includes(copilotProvider)
+    ? providerModels[copilotModelCacheKey] ?? []
+    : [];
+  const transcriptionProviderConnected =
+    transcriptionEngine === 'whisper'
+      ? connectedProviders.includes('openai')
+      : connectedProviders.includes(activeTranscriptionProvider);
+  const transcriptionModelOptions = transcriptionProviderConnected
+    ? providerModels[transcriptionModelCacheKey] ?? []
+    : [];
+  const copilotModelsLoading = providerModelsLoading[copilotModelCacheKey] ?? false;
+  const transcriptionModelsLoading = transcriptionProviderConnected
+    ? providerModelsLoading[transcriptionModelCacheKey] ?? false
+    : false;
+  const copilotModelsError = connectedProviders.includes(copilotProvider)
+    ? providerModelsError[copilotModelCacheKey] ?? ''
+    : '';
+  const transcriptionModelsError = transcriptionProviderConnected
+    ? providerModelsError[transcriptionModelCacheKey] ?? ''
+    : '';
+
+  function mergeProviderStatuses(statuses: ProviderConnection[]) {
+    setProviders(
+      statuses.map((entry) => ({
+        provider: entry.provider,
+        connected: entry.connected,
+        via: entry.via,
+        last_updated_at: entry.last_updated_at,
+      })),
+    );
+  }
+
+  async function loadProviderModels(provider: ProviderId, useCase: ModelUseCase) {
+    const cacheKey = `${provider}:${useCase}`;
+    setProviderModelsLoading((prev) => ({ ...prev, [cacheKey]: true }));
+    setProviderModelsError((prev) => ({ ...prev, [cacheKey]: '' }));
+    try {
+      const models = await fetchProviderModels(provider, useCase);
+      setProviderModels((prev) => ({ ...prev, [cacheKey]: models }));
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : 'Unable to load models.';
+      const friendlyMessage =
+        rawMessage === 'Credential not found'
+          ? `Save a ${provider === 'openai' ? 'OpenAI' : 'OpenRouter'} key in Settings to browse models.`
+          : rawMessage.includes('usable access token')
+            ? `This ${provider === 'openai' ? 'OpenAI' : 'OpenRouter'} OAuth connection cannot list models yet. Use BYOK for model selection.`
+            : rawMessage;
+      setProviderModelsError((prev) => ({
+        ...prev,
+        [cacheKey]: friendlyMessage,
+      }));
+    } finally {
+      setProviderModelsLoading((prev) => ({ ...prev, [cacheKey]: false }));
+    }
+  }
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('notebook_theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(COPILOT_PROVIDER_STORAGE_KEY, copilotProvider);
+  }, [copilotProvider]);
+
+  useEffect(() => {
+    if (copilotModel.trim()) {
+      localStorage.setItem(COPILOT_MODEL_STORAGE_KEY, copilotModel);
+      return;
+    }
+    localStorage.removeItem(COPILOT_MODEL_STORAGE_KEY);
+  }, [copilotModel]);
+
+  useEffect(() => {
+    localStorage.setItem(TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY, llmTranscriptionProvider);
+  }, [llmTranscriptionProvider]);
+
+  useEffect(() => {
+    if (llmTranscriptionModel.trim()) {
+      localStorage.setItem(TRANSCRIPTION_LLM_MODEL_STORAGE_KEY, llmTranscriptionModel);
+      return;
+    }
+    localStorage.removeItem(TRANSCRIPTION_LLM_MODEL_STORAGE_KEY);
+  }, [llmTranscriptionModel]);
+
+  useEffect(() => {
+    if (whisperTranscriptionModel.trim()) {
+      localStorage.setItem(TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY, whisperTranscriptionModel);
+      return;
+    }
+    localStorage.removeItem(TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY);
+  }, [whisperTranscriptionModel]);
 
   useEffect(() => {
     interviewGuidanceRef.current = interviewGuidance;
@@ -470,14 +599,7 @@ export default function App() {
         ]);
 
         setNotes(loadedNotes);
-        setProviders(
-          providerStatuses.map((entry) => ({
-            provider: entry.provider,
-            connected: entry.connected,
-            via: entry.via,
-            last_updated_at: entry.last_updated_at,
-          })),
-        );
+        mergeProviderStatuses(providerStatuses);
         setStoragePreference(pref);
         setLocalRootPath(pref.local_root || localRoot);
         setSyncStatus(sync);
@@ -514,6 +636,76 @@ export default function App() {
   }, [authReady, sessionUserId, legalStage]);
 
   useEffect(() => {
+    if (connectedProviders.length === 0) return;
+    if (!connectedProviders.includes(copilotProvider)) {
+      setCopilotProvider(connectedProviders[0]!);
+    }
+  }, [connectedProviders, copilotProvider]);
+
+  useEffect(() => {
+    if (transcriptionEngine !== 'llm') return;
+    if (connectedProviders.length === 0) return;
+    if (!connectedProviders.includes(llmTranscriptionProvider)) {
+      setLlmTranscriptionProvider(connectedProviders[0]!);
+    }
+  }, [connectedProviders, llmTranscriptionProvider, transcriptionEngine]);
+
+  useEffect(() => {
+    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
+    if (!connectedProviders.includes(copilotProvider)) return;
+    void loadProviderModels(copilotProvider, 'copilot');
+  }, [authReady, sessionUserId, legalStage, connectedProviders, copilotProvider]);
+
+  useEffect(() => {
+    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
+    if (transcriptionEngine === 'whisper') {
+      if (!connectedProviders.includes('openai')) return;
+    } else if (!connectedProviders.includes(activeTranscriptionProvider)) {
+      return;
+    }
+    void loadProviderModels(activeTranscriptionProvider, 'transcription');
+  }, [
+    authReady,
+    sessionUserId,
+    legalStage,
+    connectedProviders,
+    activeTranscriptionProvider,
+    transcriptionEngine,
+  ]);
+
+  useEffect(() => {
+    if (copilotModelOptions.length === 0) {
+      if (copilotModel) setCopilotModel('');
+      return;
+    }
+    if (!copilotModelOptions.some((option) => option.id === copilotModel)) {
+      setCopilotModel(copilotModelOptions[0]!.id);
+    }
+  }, [copilotModelOptions, copilotModel]);
+
+  useEffect(() => {
+    if (transcriptionEngine !== 'llm') return;
+    if (transcriptionModelOptions.length === 0) {
+      if (llmTranscriptionModel) setLlmTranscriptionModel('');
+      return;
+    }
+    if (!transcriptionModelOptions.some((option) => option.id === llmTranscriptionModel)) {
+      setLlmTranscriptionModel(transcriptionModelOptions[0]!.id);
+    }
+  }, [transcriptionEngine, transcriptionModelOptions, llmTranscriptionModel]);
+
+  useEffect(() => {
+    if (transcriptionEngine !== 'whisper') return;
+    if (transcriptionModelOptions.length === 0) {
+      if (whisperTranscriptionModel) setWhisperTranscriptionModel('');
+      return;
+    }
+    if (!transcriptionModelOptions.some((option) => option.id === whisperTranscriptionModel)) {
+      setWhisperTranscriptionModel(transcriptionModelOptions[0]!.id);
+    }
+  }, [transcriptionEngine, transcriptionModelOptions, whisperTranscriptionModel]);
+
+  useEffect(() => {
     if (!authReady || !sessionUserId || legalStage !== 'ready') return;
     if (storagePreference.mode !== 'local_and_drive') return;
 
@@ -539,11 +731,6 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [authReady, sessionUserId, legalStage, storagePreference.mode]);
-
-  const selectedNote = useMemo(
-    () => notes.find((note) => note.frontmatter.id === selectedId) ?? null,
-    [notes, selectedId],
-  );
 
   function clearInterviewSegmentTimer() {
     if (interviewSegmentTimerRef.current !== null) {
@@ -866,6 +1053,14 @@ export default function App() {
     if (sessionModeRef.current !== 'interview_assist') return;
     if (interviewUpdateInFlightRef.current) return;
     if (mergedAudio.size === 0) return;
+    if (!connectedProviders.includes(copilotProvider)) {
+      setTranscriptionStatus('Connect an AI provider in Settings to use Interview Assist.');
+      return;
+    }
+    if (transcriptionEngine === 'llm' && !connectedProviders.includes(llmTranscriptionProvider)) {
+      setTranscriptionStatus('Connect a provider in Settings to use Detailed transcription.');
+      return;
+    }
 
     interviewUpdateInFlightRef.current = true;
     setTranscriptionBusy(true);
@@ -873,9 +1068,10 @@ export default function App() {
     try {
       const result = await transcribeAudioChunk(
         mergedAudio,
-        'openai',
+        activeTranscriptionProvider,
         transcriptionEngine,
         segmentId,
+        activeTranscriptionModel || undefined,
       );
       if (!result.ok) {
         const recoverableFailure = Boolean(result.recoverable);
@@ -920,7 +1116,8 @@ export default function App() {
       const turnPayload = await fetchInterviewTurns({
         transcript: transcriptForTurnExtraction,
         previous_turns: interviewTurnsRef.current,
-        provider: 'openai',
+        provider: copilotProvider,
+        model: copilotModel || undefined,
       });
       if (turnPayload.transcript_digest === interviewDigestRef.current) {
         setTranscriptionStatus(`Listening... (${result.model})`);
@@ -953,7 +1150,8 @@ export default function App() {
           latest_interviewer_turn: interviewerTurn,
           latest_interviewee_turn: latestIntervieweeTurn,
           brevity: 'short',
-          provider: 'openai',
+          provider: copilotProvider,
+          model: copilotModel || undefined,
         },
         (token) => {
           if (coachRequestId !== coachInFlightRequestIdRef.current) return;
@@ -981,6 +1179,11 @@ export default function App() {
   }
 
   async function regenerateCoach(brevity: 'short' | 'one_liner') {
+    if (!connectedProviders.includes(copilotProvider)) {
+      setMessage('Connect an AI provider in Settings to use Interview Assist.');
+      setSettingsOpen(true);
+      return;
+    }
     const interviewerTurn = selectCoachTargetTurn(
       interviewTurnsRef.current,
       interviewTranscriptRef.current,
@@ -1000,7 +1203,8 @@ export default function App() {
           latest_interviewer_turn: interviewerTurn,
           latest_interviewee_turn: intervieweeTurn,
           brevity,
-          provider: 'openai',
+          provider: copilotProvider,
+          model: copilotModel || undefined,
         },
         (token) => {
           if (coachRequestId !== coachInFlightRequestIdRef.current) return;
@@ -1147,14 +1351,27 @@ export default function App() {
 
   async function runTransform(action: 'summarize' | 'rewrite' | 'extract_action_items') {
     if (!selectedId) return;
+    if (!connectedProviders.includes(copilotProvider)) {
+      setMessage('Connect an AI provider in Settings before running Copilot.');
+      setSettingsOpen(true);
+      return;
+    }
 
     setBusy(true);
     setAiOutput('');
 
     try {
-      await streamTransform(selectedId, buildTransformContent(selectedNote, body), action, (token) => {
-        setAiOutput((prev) => prev + token);
-      });
+      await streamTransform(
+        selectedId,
+        buildTransformContent(selectedNote, body),
+        action,
+        (token) => {
+          setAiOutput((prev) => prev + token);
+        },
+        'concise',
+        copilotProvider,
+        copilotModel || undefined,
+      );
       setMessage('AI transform complete');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'AI transform failed');
@@ -1174,14 +1391,9 @@ export default function App() {
       await storeByok(byokProvider, byokValue.trim());
       setByokValue('');
       const statuses = await fetchProviderStatus();
-      setProviders(
-        statuses.map((entry) => ({
-          provider: entry.provider,
-          connected: entry.connected,
-          via: entry.via,
-          last_updated_at: entry.last_updated_at,
-        })),
-      );
+      mergeProviderStatuses(statuses);
+      void loadProviderModels(byokProvider, 'copilot');
+      void loadProviderModels(byokProvider, 'transcription');
       setMessage('Provider key saved');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to save key');
@@ -1195,14 +1407,12 @@ export default function App() {
     try {
       await disconnectProvider(provider);
       const statuses = await fetchProviderStatus();
-      setProviders(
-        statuses.map((entry) => ({
-          provider: entry.provider,
-          connected: entry.connected,
-          via: entry.via,
-          last_updated_at: entry.last_updated_at,
-        })),
-      );
+      mergeProviderStatuses(statuses);
+      setProviderModelsError((prev) => ({
+        ...prev,
+        [`${provider}:copilot`]: '',
+        [`${provider}:transcription`]: '',
+      }));
       setMessage(`Disconnected ${provider}.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to disconnect provider');
@@ -1749,6 +1959,10 @@ export default function App() {
           setTranscriptionStatus('No audio captured.');
           return;
         }
+        if (transcriptionEngine === 'llm' && !connectedProviders.includes(llmTranscriptionProvider)) {
+          setTranscriptionStatus('Connect a provider in Settings to use Detailed transcription.');
+          return;
+        }
 
         setTranscriptionBusy(true);
         setTranscriptionStatus(
@@ -1757,7 +1971,13 @@ export default function App() {
             : 'Transcribing final recording (Fast mode)...',
         );
 
-        void transcribeAudioChunk(merged, 'openai', transcriptionEngine)
+        void transcribeAudioChunk(
+          merged,
+          activeTranscriptionProvider,
+          transcriptionEngine,
+          undefined,
+          activeTranscriptionModel || undefined,
+        )
           .then((result) => {
             if (result.text.trim()) {
               appendTranscriptChunk(result.text);
@@ -2251,6 +2471,14 @@ export default function App() {
         onDisconnectProvider={(p) => {
           void handleDisconnectProvider(p);
         }}
+        connectedProviders={connectedProviders}
+        copilotProvider={copilotProvider}
+        copilotModel={copilotModel}
+        copilotModels={copilotModelOptions}
+        copilotModelsLoading={copilotModelsLoading}
+        copilotModelsError={copilotModelsError}
+        onCopilotProviderChange={setCopilotProvider}
+        onCopilotModelChange={setCopilotModel}
         theme={theme}
         onThemeChange={setTheme}
         sessionUserId={sessionUserId}
@@ -2283,7 +2511,20 @@ export default function App() {
           void handleRefreshDriveStatus();
         }}
         transcriptionEngine={transcriptionEngine}
+        transcriptionProvider={activeTranscriptionProvider}
+        transcriptionModel={activeTranscriptionModel}
+        transcriptionModels={transcriptionModelOptions}
+        transcriptionModelsLoading={transcriptionModelsLoading}
+        transcriptionModelsError={transcriptionModelsError}
         onTranscriptionEngineChange={handleTranscriptionEngineChange}
+        onTranscriptionProviderChange={setLlmTranscriptionProvider}
+        onTranscriptionModelChange={(model) => {
+          if (transcriptionEngine === 'whisper') {
+            setWhisperTranscriptionModel(model);
+            return;
+          }
+          setLlmTranscriptionModel(model);
+        }}
       />
     </main>
   );

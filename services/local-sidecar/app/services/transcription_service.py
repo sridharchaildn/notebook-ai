@@ -55,6 +55,7 @@ class TranscriptionService:
         provider: str = "openai",
         transcription_mode: str = "whisper",
         segment_id: int | None = None,
+        model: str | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         log.debug(
@@ -71,6 +72,8 @@ class TranscriptionService:
                 audio_bytes=audio_bytes,
                 filename=filename,
                 content_type=content_type,
+                provider=provider,
+                model=model,
                 access_token=access_token,
             )
             result.segment_id = segment_id
@@ -81,6 +84,7 @@ class TranscriptionService:
             filename=filename,
             content_type=content_type,
             provider=provider,
+            model=model,
             access_token=access_token,
         )
         result.segment_id = segment_id
@@ -92,23 +96,39 @@ class TranscriptionService:
         audio_bytes: bytes,
         filename: str,
         content_type: str,
+        provider: str,
+        model: str | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         or_key = await self._resolve_openrouter_api_key(access_token=access_token)
         oa_key = await self._resolve_openai_api_key(access_token=access_token)
 
-        if or_key:
+        if provider == "openrouter" and or_key:
             url = f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions"
-            model = self.settings.transcription_llm_openrouter_model
+            selected_model = model or self.settings.transcription_llm_openrouter_model
             api_key = or_key
             used_provider = "openrouter"
             extra_headers = {
                 "HTTP-Referer": "https://notebook-ai.local",
                 "X-Title": "Notebook AI",
             }
+        elif provider == "openrouter":
+            msg = (
+                "OpenRouter transcription needs an OpenRouter API key. "
+                "Save one in Settings or switch the transcription provider."
+            )
+            return TranscriptionResult(
+                text="",
+                provider="openrouter",
+                model=model or self.settings.transcription_llm_openrouter_model,
+                detail=msg,
+                ok=False,
+                error_code="auth_or_quota",
+                recoverable=False,
+            )
         elif oa_key:
             url = OPENAI_CHAT_URL
-            model = self.settings.transcription_llm_openai_model
+            selected_model = model or self.settings.transcription_llm_openai_model
             api_key = oa_key
             used_provider = "openai"
             extra_headers = {}
@@ -120,8 +140,15 @@ class TranscriptionService:
             log.warning("transcribe_llm: no openrouter or openai key")
             return TranscriptionResult(
                 text="",
-                provider="openrouter",
-                model=self.settings.transcription_llm_openrouter_model,
+                provider=provider if provider in {"openai", "openrouter"} else "openai",
+                model=(
+                    model
+                    or (
+                        self.settings.transcription_llm_openrouter_model
+                        if provider == "openrouter"
+                        else self.settings.transcription_llm_openai_model
+                    )
+                ),
                 detail=msg,
                 ok=False,
                 error_code="auth_or_quota",
@@ -133,7 +160,7 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider=used_provider,
-                model=model,
+                model=selected_model,
                 detail=prepared.error,
                 ok=False,
                 error_code="invalid_audio_format",
@@ -144,7 +171,7 @@ class TranscriptionService:
         audio_format = prepared.api_format
 
         payload: dict[str, Any] = {
-            "model": model,
+            "model": selected_model,
             "messages": [
                 {
                     "role": "user",
@@ -175,7 +202,7 @@ class TranscriptionService:
                 log.info(
                     "transcribe_llm: POST chat/completions provider=%s model=%s format=%s payload_bytes=%s",
                     used_provider,
-                    model,
+                    selected_model,
                     audio_format,
                     len(prepared.data),
                 )
@@ -185,7 +212,7 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider=used_provider,
-                model=model,
+                model=selected_model,
                 detail=f"LLM transcription request failed: {exc}",
                 ok=False,
                 error_code="network_error",
@@ -200,13 +227,13 @@ class TranscriptionService:
                 preview.replace("\n", " "),
             )
             detail = f"LLM transcription HTTP {response.status_code}: {preview}"
-            extra = _llm_transcription_error_hint(response.status_code, preview, model)
+            extra = _llm_transcription_error_hint(response.status_code, preview, selected_model)
             if extra:
                 detail = f"{detail}\n{extra}"
             return TranscriptionResult(
                 text="",
                 provider=used_provider,
-                model=model,
+                model=selected_model,
                 detail=detail,
                 ok=False,
                 error_code="provider_http_error",
@@ -219,7 +246,7 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider=used_provider,
-                model=model,
+                model=selected_model,
                 detail="LLM transcription: invalid JSON response.",
                 ok=False,
                 error_code="provider_http_error",
@@ -231,7 +258,7 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider=used_provider,
-                model=model,
+                model=selected_model,
                 detail="LLM transcription: empty choices in response.",
                 ok=False,
                 error_code="provider_http_error",
@@ -243,7 +270,7 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider=used_provider,
-                model=model,
+                model=selected_model,
                 detail="LLM transcription: missing message in response.",
                 ok=False,
                 error_code="provider_http_error",
@@ -255,7 +282,7 @@ class TranscriptionService:
         return TranscriptionResult(
             text=text,
             provider=used_provider,
-            model=model,
+            model=selected_model,
             detail=None if text else "LLM returned empty transcript (model may not support this audio format).",
             ok=True,
             error_code="none",
@@ -269,6 +296,7 @@ class TranscriptionService:
         filename: str,
         content_type: str,
         provider: str,
+        model: str | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         if provider != "openai":
@@ -280,7 +308,7 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider=provider,
-                model=self.settings.openai_transcription_model,
+                model=model or self.settings.openai_transcription_model,
                 detail=msg,
                 ok=False,
                 error_code="provider_http_error",
@@ -297,18 +325,24 @@ class TranscriptionService:
             return TranscriptionResult(
                 text="",
                 provider="openai",
-                model=self.settings.openai_transcription_model,
+                model=model or self.settings.openai_transcription_model,
                 detail=msg,
                 ok=False,
                 error_code="auth_or_quota",
                 recoverable=False,
             )
 
-        models_to_try = [
+        models_to_try: list[str] = []
+        for candidate in [
+            model,
             self.settings.openai_transcription_model,
             "gpt-4o-mini-transcribe",
             "whisper-1",
-        ]
+        ]:
+            if not candidate:
+                continue
+            if candidate not in models_to_try:
+                models_to_try.append(candidate)
 
         last_error: str | None = None
         last_error_code = "provider_http_error"
@@ -368,7 +402,7 @@ class TranscriptionService:
         return TranscriptionResult(
             text="",
             provider="openai",
-            model=self.settings.openai_transcription_model,
+            model=model or self.settings.openai_transcription_model,
             detail=detail,
             ok=False,
             error_code=last_error_code,
