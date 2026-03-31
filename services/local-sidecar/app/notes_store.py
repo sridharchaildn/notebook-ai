@@ -466,11 +466,13 @@ class NoteStore:
 
         if isinstance(note.session, TranscriptSessionData):
             parts.append(note.session.transcript)
+            parts.append(note.session.summary or "")
         elif isinstance(note.session, InterviewSessionData):
             parts.extend(
                 [
                     note.session.transcript,
                     note.session.guidance,
+                    note.session.summary or "",
                     " ".join(turn.text for turn in note.session.turns),
                 ],
             )
@@ -488,27 +490,32 @@ class NoteStore:
             if isinstance(session, TranscriptSessionData):
                 transcript = session.transcript or content
                 segments = session.segments
+                summary = session.summary
                 last_updated_at = session.last_updated_at or note.frontmatter.updated_at
             else:
                 transcript = content
                 segments = []
+                summary = None
             content = transcript
             content_format = "plain_text"
             session = TranscriptSessionData(
                 transcript=transcript,
                 segments=segments,
+                summary=summary,
                 last_updated_at=last_updated_at,
             )
         elif note.kind == "interview_assist":
             transcript = ""
             guidance = ""
             turns = []
+            summary = None
             last_coached_turn = None
             last_updated_at = note.frontmatter.updated_at
             if isinstance(session, InterviewSessionData):
                 transcript = session.transcript or content
                 guidance = session.guidance
                 turns = session.turns
+                summary = session.summary
                 last_coached_turn = session.last_coached_interviewer_turn_id
                 last_updated_at = session.last_updated_at or note.frontmatter.updated_at
             else:
@@ -519,6 +526,7 @@ class NoteStore:
                 transcript=transcript,
                 guidance=guidance,
                 turns=turns,
+                summary=summary,
                 last_coached_interviewer_turn_id=last_coached_turn,
                 last_updated_at=last_updated_at,
             )

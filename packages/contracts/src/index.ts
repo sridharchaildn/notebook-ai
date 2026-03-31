@@ -120,6 +120,7 @@ export interface TranscriptSessionData {
   session_type: 'transcript';
   transcript: string;
   segments?: TranscriptSegment[];
+  summary?: string | null;
   last_updated_at?: string | null;
 }
 
@@ -128,6 +129,7 @@ export interface InterviewSessionData {
   transcript: string;
   guidance: string;
   turns: InterviewTurn[];
+  summary?: string | null;
   last_coached_interviewer_turn_id?: string | null;
   last_updated_at?: string | null;
 }
@@ -149,6 +151,7 @@ export interface NoteAIContext {
   context_preset?: NoteContextPreset | null;
   context_text?: string | null;
   transcript_segments?: TranscriptSegment[];
+  summary?: string | null;
 }
 
 export interface InterviewTurnsRequest {

@@ -4,13 +4,16 @@ import { FileText, ListChecks, LoaderCircle, MessageSquareText, Send, Sparkles, 
 interface Props {
   output: string;
   running: boolean;
+  runningAction: AITransformType | null;
   onRun: (action: AITransformType) => void;
+  onStopTransform: () => void;
   transcriptChatEnabled: boolean;
   chatDraft: string;
   chatHistory: CopilotChatMessage[];
   chatBusy: boolean;
   onChatDraftChange: (value: string) => void;
   onSendChat: () => void;
+  onStopChat: () => void;
   onClearChat: () => void;
 }
 
@@ -38,20 +41,43 @@ const actions: Array<{ id: AITransformType; label: string; description: string; 
 export function AIActionPanel({
   output,
   running,
+  runningAction,
   onRun,
+  onStopTransform,
   transcriptChatEnabled,
   chatDraft,
   chatHistory,
   chatBusy,
   onChatDraftChange,
   onSendChat,
+  onStopChat,
   onClearChat,
 }: Props) {
+  const runningCopy =
+    runningAction === 'summarize'
+      ? 'Generating summary...'
+      : runningAction === 'rewrite'
+        ? 'Rewriting note...'
+        : runningAction === 'extract_action_items'
+          ? 'Extracting action items...'
+          : 'Working...';
+
   return (
     <section className="ai-panel">
       <div className="section-title-row">
         <h2>AI Copilot</h2>
-        {running ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} style={{ color: 'var(--primary)' }} />}
+        <div className="transcription-panel__header-actions">
+          {running ? (
+            <>
+              <LoaderCircle size={16} className="spin" />
+              <button type="button" className="ghost-btn ghost-btn--compact" onClick={onStopTransform}>
+                Stop
+              </button>
+            </>
+          ) : (
+            <Sparkles size={16} style={{ color: 'var(--primary)' }} />
+          )}
+        </div>
       </div>
 
       <div className="ai-actions">
@@ -75,7 +101,7 @@ export function AIActionPanel({
       </div>
 
       <div className="ai-output" role="status" aria-live="polite">
-        {output || 'AI output appears here as tokens stream in.'}
+        {output || (running ? runningCopy : 'AI output appears here as tokens stream in.')}
       </div>
 
       {transcriptChatEnabled ? (
@@ -114,11 +140,11 @@ export function AIActionPanel({
             <button
               type="button"
               className="solid-btn"
-              disabled={chatBusy || chatDraft.trim().length === 0}
-              onClick={onSendChat}
+              disabled={!chatBusy && chatDraft.trim().length === 0}
+              onClick={chatBusy ? onStopChat : onSendChat}
             >
               <Send size={14} />
-              {chatBusy ? 'Sending...' : 'Send'}
+              {chatBusy ? 'Stop' : 'Send'}
             </button>
           </div>
         </section>

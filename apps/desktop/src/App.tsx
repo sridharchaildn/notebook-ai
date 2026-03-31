@@ -1,8 +1,6 @@
 import {
-  buildTranscriptFromSegments,
   commitTag,
   removeTag,
-  sourceHintLabel,
 } from './lib/noteMetadata';
 import type { NoteContextPreset } from '@notebook-ai/contracts';
 import {
@@ -13,6 +11,7 @@ import {
 } from '@notebook-ai/app-core';
 import type {
   CopilotChatMessage,
+  AITransformType,
   ContentFormat,
   DriveConnectionStatus,
   InterviewSessionData,
@@ -32,7 +31,7 @@ import type {
   TranscriptSegment,
   TranscriptSessionData,
 } from '@notebook-ai/contracts';
-import { ChevronRight, Pencil, PanelLeftClose, PanelRightClose, Sparkles, Trash2 } from 'lucide-react';
+import { ChevronRight, Pencil, PanelLeftClose, PanelRightClose, Sparkles, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { AIActionPanel } from './components/AIActionPanel';
 import { LegalAcceptanceGate } from './components/LegalAcceptanceGate';
@@ -217,6 +216,7 @@ export default function App() {
   const [aiPanelOpen, setAiPanelOpen] = useState(true);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [activeTransformAction, setActiveTransformAction] = useState<AITransformType | null>(null);
   const [byokSubmitting, setByokSubmitting] = useState(false);
   const [providerDisconnecting, setProviderDisconnecting] = useState<ProviderId | null>(null);
   const [aiOutput, setAiOutput] = useState('');
@@ -233,6 +233,8 @@ export default function App() {
   const [interviewGuidanceBusy, setInterviewGuidanceBusy] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  const [noteSummary, setNoteSummary] = useState('');
+  const [transcriptViewTab, setTranscriptViewTab] = useState<'transcript' | 'summary'>('transcript');
   const [copilotChatDraft, setCopilotChatDraft] = useState('');
   const [copilotChatHistory, setCopilotChatHistory] = useState<CopilotChatMessage[]>([]);
   const [copilotChatBusy, setCopilotChatBusy] = useState(false);
@@ -278,6 +280,7 @@ export default function App() {
   const coachInFlightRequestIdRef = useRef(0);
   const interviewGuidanceRef = useRef('');
   const transcriptSegmentsRef = useRef<TranscriptSegment[]>([]);
+  const noteSummaryRef = useRef('');
   const candidateMutedRef = useRef(false);
   const interviewThreadRef = useRef<HTMLDivElement | null>(null);
   const interviewBottomSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -287,6 +290,8 @@ export default function App() {
   const authCallbackInFlightRef = useRef<string | null>(null);
   const lastHandledAuthCallbackRef = useRef<string | null>(null);
   const driveConnectPollingRef = useRef(false);
+  const transformAbortRef = useRef<AbortController | null>(null);
+  const copilotChatAbortRef = useRef<AbortController | null>(null);
 
   function applyRendererSession(session: DesktopRendererSession | null) {
     setRendererSessionFallback(session);
@@ -302,6 +307,8 @@ export default function App() {
     () => notes.find((note) => note.frontmatter.id === selectedId) ?? null,
     [notes, selectedId],
   );
+  const showInterviewNoteView = selectedNote?.kind === 'interview_assist';
+  const showTranscriptNoteView = isTranscriptNote(selectedNote);
   const connectedProviders = useMemo(
     () => providers.filter((entry) => entry.connected).map((entry) => entry.provider),
     [providers],
@@ -412,6 +419,10 @@ export default function App() {
   useEffect(() => {
     transcriptSegmentsRef.current = transcriptSegments;
   }, [transcriptSegments]);
+
+  useEffect(() => {
+    noteSummaryRef.current = noteSummary;
+  }, [noteSummary]);
 
   useEffect(() => {
     interviewTurnsRef.current = interviewTurns;
@@ -617,6 +628,7 @@ export default function App() {
         }
 
         setLegalStage('ready');
+        setMessage('Ready');
       } catch (error) {
         if (disposed) return;
         setLegalError(error instanceof Error ? error.message : 'Unable to load legal requirements.');
@@ -770,6 +782,8 @@ export default function App() {
     };
   }, [authReady, sessionUserId, legalStage, storagePreference.mode]);
 
+
+
   function clearInterviewSegmentTimer() {
     if (interviewSegmentTimerRef.current !== null) {
       window.clearTimeout(interviewSegmentTimerRef.current);
@@ -781,12 +795,14 @@ export default function App() {
     transcript: string,
     guidance: string,
     turns: InterviewTurn[] = interviewTurnsRef.current,
+    summary: string | null = noteSummaryRef.current || null,
   ): InterviewSessionData {
     return {
       session_type: 'interview_assist',
       transcript,
       guidance,
       turns,
+      summary,
       last_coached_interviewer_turn_id: lastCoachedInterviewerTurnIdRef.current,
       last_updated_at: new Date().toISOString(),
     };
@@ -795,11 +811,13 @@ export default function App() {
   function buildTranscriptSession(
     transcript: string,
     segments: TranscriptSegment[] = transcriptSegmentsRef.current,
+    summary: string | null = noteSummaryRef.current || null,
   ): TranscriptSessionData {
     return {
       session_type: 'transcript',
       transcript,
       segments,
+      summary,
       last_updated_at: new Date().toISOString(),
     };
   }
@@ -820,12 +838,15 @@ export default function App() {
           interviewTranscriptRef.current || content,
           interviewGuidanceRef.current,
           interviewTurnsRef.current,
+          noteSummaryRef.current || null,
         ),
       );
     }
 
     if (kind === 'transcript') {
-      return serializeExistingSessionForCompare(buildTranscriptSession(content, transcriptSegmentsRef.current));
+      return serializeExistingSessionForCompare(
+        buildTranscriptSession(content, transcriptSegmentsRef.current, noteSummaryRef.current || null),
+      );
     }
 
     return 'null';
@@ -839,7 +860,27 @@ export default function App() {
       context_preset: contextPreset,
       context_text: contextText.trim() || null,
       transcript_segments: noteKind === 'transcript' ? transcriptSegmentsRef.current : [],
+      summary: noteSummaryRef.current || null,
     };
+  }
+
+  function buildTransformNoteContext(action: AITransformType): NoteAIContext {
+    const base = buildCurrentNoteContext();
+    if (action === 'summarize' || action === 'rewrite') {
+      return {
+        ...base,
+        transcript_segments: [],
+        summary: null,
+      };
+    }
+    return base;
+  }
+
+  function isAbortError(error: unknown): boolean {
+    return (
+      (error instanceof DOMException && error.name === 'AbortError') ||
+      (error instanceof Error && error.name === 'AbortError')
+    );
   }
 
   function commitTagDraft() {
@@ -867,6 +908,8 @@ export default function App() {
       setContextPreset('custom');
       setContextText('');
       setTranscriptSegments([]);
+      setNoteSummary('');
+      setTranscriptViewTab('transcript');
       setInterviewTranscript('');
       setInterviewTurns([]);
       setInterviewGuidance('');
@@ -882,12 +925,13 @@ export default function App() {
     setContentFormat(note.content_format);
     setShowMarkdownSource(false);
     setTags(note.frontmatter.tags);
-    setTagDraft('');
-    setContextPreset(note.frontmatter.context_preset ?? 'custom');
-    setContextText(note.frontmatter.context_text ?? '');
-    setAiOutput('');
-    setCopilotChatDraft('');
-    setCopilotChatHistory([]);
+      setTagDraft('');
+      setContextPreset(note.frontmatter.context_preset ?? 'custom');
+      setContextText(note.frontmatter.context_text ?? '');
+      setAiOutput('');
+      setTranscriptViewTab('transcript');
+      setCopilotChatDraft('');
+      setCopilotChatHistory([]);
 
     if (note.kind === 'interview_assist') {
       const session = getInterviewSession(note);
@@ -900,6 +944,7 @@ export default function App() {
       setInterviewTranscript(transcript);
       setInterviewTurns(turns);
       setInterviewGuidance(guidance);
+      setNoteSummary(session?.summary ?? '');
       lastCoachedInterviewerTurnIdRef.current =
         session?.last_coached_interviewer_turn_id ?? null;
       setTranscriptSegments([]);
@@ -911,6 +956,7 @@ export default function App() {
       const transcript = session?.transcript ?? note.content;
       setBody(transcript);
       setTranscriptSegments(session?.segments ?? []);
+      setNoteSummary(session?.summary ?? '');
       interviewTranscriptRef.current = '';
       interviewTurnsRef.current = [];
       interviewGuidanceRef.current = '';
@@ -921,6 +967,7 @@ export default function App() {
     }
 
     setTranscriptSegments([]);
+    setNoteSummary('');
     interviewTranscriptRef.current = '';
     interviewTurnsRef.current = [];
     interviewGuidanceRef.current = '';
@@ -1222,7 +1269,7 @@ export default function App() {
         const recoverableFailure = Boolean(result.recoverable);
         const detail =
           result.detail?.trim() ||
-          `Transcription failed (${result.provider} / ${result.model}).`;
+          'Transcription failed.';
         setTranscriptionStatus(detail);
 
         if (
@@ -1244,16 +1291,14 @@ export default function App() {
       const chunkTranscript = result.text.trim();
       if (!chunkTranscript) {
         interviewRecoverableFailureCountRef.current = 0;
-        setTranscriptionStatus(
-          result.detail?.trim() || `Listening... (${result.model})`,
-        );
+        setTranscriptionStatus(result.detail?.trim() || 'Listening...');
         return;
       }
       interviewRecoverableFailureCountRef.current = 0;
 
       const nextTranscript = mergeTranscriptText(interviewTranscriptRef.current, chunkTranscript);
       if (!nextTranscript || nextTranscript === interviewTranscriptRef.current) {
-        setTranscriptionStatus(`Listening... (${result.model})`);
+        setTranscriptionStatus('Listening...');
         return;
       }
       const transcriptForTurnExtraction = nextTranscript.slice(-INTERVIEW_TRANSCRIPT_TAIL_CHARS);
@@ -1265,7 +1310,7 @@ export default function App() {
         model: copilotModel || undefined,
       });
       if (turnPayload.transcript_digest === interviewDigestRef.current) {
-        setTranscriptionStatus(`Listening... (${result.model})`);
+        setTranscriptionStatus('Listening...');
         return;
       }
 
@@ -1275,7 +1320,7 @@ export default function App() {
       setInterviewTranscript(nextTranscript);
       setInterviewTurns(turnPayload.turns);
       setBody(nextTranscript);
-      setTranscriptionStatus(`Listening... (${result.model})`);
+      setTranscriptionStatus('Listening...');
 
       const interviewerTurn = selectCoachTargetTurn(turnPayload.turns, nextTranscript);
       if (!interviewerTurn) {
@@ -1413,9 +1458,10 @@ export default function App() {
                 interviewTranscriptRef.current || body,
                 interviewGuidanceRef.current,
                 interviewTurnsRef.current,
+                noteSummaryRef.current || null,
               )
             : noteKind === 'transcript'
-              ? buildTranscriptSession(body, transcriptSegmentsRef.current)
+              ? buildTranscriptSession(body, transcriptSegmentsRef.current, noteSummaryRef.current || null)
               : null,
       };
 
@@ -1460,6 +1506,7 @@ export default function App() {
       interviewGuidance,
       interviewTurns,
       transcriptSegments,
+      noteSummary,
     ],
     280,
   );
@@ -1570,6 +1617,15 @@ export default function App() {
     setMessage('Delete undone.');
   }
 
+  function dismissPendingDelete() {
+    if (!pendingDelete) return;
+    if (deleteUndoTimerRef.current !== null) {
+      window.clearTimeout(deleteUndoTimerRef.current);
+      deleteUndoTimerRef.current = null;
+    }
+    void finalizePendingDelete(pendingDelete);
+  }
+
   async function runCopilotChat() {
     if (!selectedId || !selectedNote || !copilotChatDraft.trim()) return;
     if (!connectedProviders.includes(copilotProvider)) {
@@ -1587,6 +1643,9 @@ export default function App() {
     setCopilotChatHistory(history);
     setCopilotChatDraft('');
     setCopilotChatBusy(true);
+    copilotChatAbortRef.current?.abort();
+    const abortController = new AbortController();
+    copilotChatAbortRef.current = abortController;
 
     let answer = '';
     try {
@@ -1608,13 +1667,22 @@ export default function App() {
             return next;
           });
         },
+        abortController.signal,
       );
       setMessage('Copilot response ready.');
     } catch (error) {
-      setCopilotChatHistory((prev) => prev.filter((_, index) => index < prev.length - 1));
-      setMessage(error instanceof Error ? error.message : 'Copilot chat failed.');
+      if (isAbortError(error)) {
+        if (!answer.trim()) {
+          setCopilotChatHistory((prev) => prev.filter((_, index) => index < prev.length - 1));
+        }
+        setMessage('Copilot request stopped.');
+      } else {
+        setCopilotChatHistory((prev) => prev.filter((_, index) => index < prev.length - 1));
+        setMessage(error instanceof Error ? error.message : 'Copilot chat failed.');
+      }
     } finally {
       setCopilotChatBusy(false);
+      copilotChatAbortRef.current = null;
     }
   }
 
@@ -1627,7 +1695,18 @@ export default function App() {
     }
 
     setBusy(true);
+    setActiveTransformAction(action);
     setAiOutput('');
+    if (action === 'summarize' && (noteKind === 'transcript' || noteKind === 'interview_assist')) {
+      setTranscriptViewTab('summary');
+      setMessage('Generating summary...');
+    } else {
+      setMessage('Running Copilot...');
+    }
+    transformAbortRef.current?.abort();
+    const abortController = new AbortController();
+    transformAbortRef.current = abortController;
+    let nextOutput = '';
 
     try {
       await streamTransform(
@@ -1635,18 +1714,36 @@ export default function App() {
         buildTransformContent(selectedNote, body),
         action,
         (token) => {
-          setAiOutput((prev) => prev + token);
+          nextOutput += token;
+          setAiOutput(nextOutput);
         },
         'concise',
         copilotProvider,
         copilotModel || undefined,
-        buildCurrentNoteContext(),
+        buildTransformNoteContext(action),
+        abortController.signal,
       );
-      setMessage('AI transform complete');
+
+      if (action === 'summarize' && (noteKind === 'transcript' || noteKind === 'interview_assist')) {
+        const summary = nextOutput.trim();
+        setNoteSummary(summary);
+        if (noteKind === 'transcript') {
+          setTranscriptViewTab('summary');
+        }
+        setMessage(summary ? 'Summary saved.' : 'Summary is empty.');
+      } else {
+        setMessage('AI transform complete');
+      }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'AI transform failed');
+      if (isAbortError(error)) {
+        setMessage('Copilot request stopped.');
+      } else {
+        setMessage(error instanceof Error ? error.message : 'AI transform failed');
+      }
     } finally {
       setBusy(false);
+      setActiveTransformAction(null);
+      transformAbortRef.current = null;
     }
   }
 
@@ -2268,9 +2365,7 @@ export default function App() {
 
         setTranscriptionBusy(true);
         setTranscriptionStatus(
-          transcriptionEngine === 'llm'
-            ? 'Transcribing full recording (Detailed mode)...'
-            : 'Transcribing final recording (Fast mode)...',
+          'Finalizing transcript...',
         );
 
         for (const handle of sourceRecorderHandles) {
@@ -2301,7 +2396,7 @@ export default function App() {
         )
           .then(async (result) => {
             let nextSegments: TranscriptSegment[] = [];
-            if (contextPreset === 'meeting' && sourceRecorderHandles.length > 0) {
+            if (sourceRecorderHandles.length > 0) {
               const segmentResults = await Promise.all(
                 sourceRecorderHandles.map(async (handle, index) => {
                   const sourceBlob = await handle.done;
@@ -2330,7 +2425,7 @@ export default function App() {
               nextSegments = segmentResults.filter(
                 (segment): segment is NonNullable<typeof segment> => segment !== null,
               );
-            } else if (contextPreset === 'meeting' && result.text.trim()) {
+            } else if (mixedSources && result.text.trim()) {
               nextSegments = [
                 {
                   id: 'segment-1',
@@ -2341,20 +2436,17 @@ export default function App() {
             }
 
             if (nextSegments.length > 0) {
-              const transcriptText = buildTranscriptFromSegments(nextSegments, result.text);
+              const transcriptText =
+                result.text.trim() || nextSegments.map((segment) => segment.text.trim()).filter(Boolean).join('\n\n');
               setTranscriptSegments(nextSegments);
               setBody(transcriptText);
-              setTranscriptionStatus(
-                `Done (${result.provider} / ${result.model}). Capture stopped.`,
-              );
+              setTranscriptionStatus('Transcript ready.');
               return;
             }
 
             if (result.text.trim()) {
               appendTranscriptChunk(result.text);
-              setTranscriptionStatus(
-                `Done (${result.provider} / ${result.model}). Capture stopped.`,
-              );
+              setTranscriptionStatus('Transcript ready.');
             } else if (result.detail) {
               setTranscriptionStatus(result.detail);
             } else {
@@ -2503,7 +2595,7 @@ export default function App() {
 
       const mixedAudioStream = destination.stream;
       const sourceRecorderHandles: SourceRecorderHandle[] =
-        sessionMode === 'notes' && contextPreset === 'meeting' && micEnabled
+        sessionMode === 'notes' && micEnabled
           ? [
               createSourceRecorderHandle('other_audio', systemAudioStream),
               ...(micStream ? [createSourceRecorderHandle('me', micStream)] : []),
@@ -2582,7 +2674,7 @@ export default function App() {
     );
   }
 
-  if (sessionUserId && legalStage !== 'ready') {
+  if (sessionUserId && (legalStage === 'needs_acceptance' || legalStage === 'error')) {
     return (
       <LegalAcceptanceGate
         stage={legalStage}
@@ -2607,14 +2699,13 @@ export default function App() {
     aiPanelOpen ? '340px' : '48px',
   ].join(' ');
   const coachTargetTurn = selectCoachTargetTurn(interviewTurns, interviewTranscript);
-  const showInterviewNoteView = selectedNote?.kind === 'interview_assist';
-  const showTranscriptNoteView = isTranscriptNote(selectedNote);
   const showMarkdownPreview = isMarkdownNote(selectedNote) && !showMarkdownSource;
   const transcriptViewText = getTranscriptSession(selectedNote)?.transcript ?? body;
   const transcriptViewSegments = selectedNote?.frontmatter.id === selectedId
     ? transcriptSegments
     : (getTranscriptSession(selectedNote)?.segments ?? []);
   const showCopilotChat = showTranscriptNoteView || showInterviewNoteView;
+
 
   return (
     <main className={`app-shell${isMacPlatform ? ' is-mac' : ''}`} style={{ gridTemplateColumns: gridCols }}>
@@ -2663,26 +2754,29 @@ export default function App() {
                 className="title-input"
                 placeholder="Untitled note"
               />
-              <TagEditor
-                tags={tags}
-                draftValue={tagDraft}
-                onDraftChange={setTagDraft}
-                onCommitDraft={commitTagDraft}
-                onRemoveTag={(tag) => setTags((prev) => removeTag(prev, tag))}
-                onRemoveLastTag={() =>
-                  setTags((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev))
-                }
-              />
-              <NoteContextEditor
-                preset={contextPreset}
-                text={contextText}
-                onPresetChange={setContextPreset}
-                onTextChange={setContextText}
-              />
+              <div className="editor-metadata">
+                <TagEditor
+                  tags={tags}
+                  draftValue={tagDraft}
+                  onDraftChange={setTagDraft}
+                  onCommitDraft={commitTagDraft}
+                  onRemoveTag={(tag) => setTags((prev) => removeTag(prev, tag))}
+                  onRemoveLastTag={() =>
+                    setTags((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev))
+                  }
+                />
+                <NoteContextEditor
+                  preset={contextPreset}
+                  text={contextText}
+                  onPresetChange={setContextPreset}
+                  onTextChange={setContextText}
+                />
+              </div>
             </div>
 
             <div className="header-right">
               <div className="editor-header__actions">
+
                 <button type="button" className="ghost-btn" onClick={() => handleRenameNote()}>
                   <Pencil size={14} />
                   Rename
@@ -2708,7 +2802,7 @@ export default function App() {
               <span className="status-pill">{saving ? 'Saving...' : message}</span>
             </div>
           </header>
-        ) : (
+        ) : !selectedNote ? (
           <header className="editor-header editor-header--empty">
             <div className="title-wrap">
               <h2 className="editor-empty-title">No note selected</h2>
@@ -2720,7 +2814,7 @@ export default function App() {
               <span className="status-pill">{message}</span>
             </div>
           </header>
-        )}
+        ) : null}
 
         {storagePreference.mode === 'local_and_drive' ? (
           <div className="sync-banner-wrap">
@@ -2732,18 +2826,20 @@ export default function App() {
           </div>
         ) : null}
 
-        <div className="transcription-anchor">
-          <TranscriptionPanel
-            recording={recording}
-            busy={transcriptionBusy}
-            status={transcriptionStatus}
-            onStart={(opts) => {
-              void startRecording(opts.captureMode, transcriptionEngine, opts.mode);
-            }}
-            onStop={stopRecording}
-            onModeChange={setActiveSessionMode}
-          />
-        </div>
+          <div className="transcription-anchor transcription-anchor--floating">
+            <TranscriptionPanel
+              recording={recording}
+              busy={transcriptionBusy}
+              status={transcriptionStatus}
+              contextPreset={contextPreset}
+              contextText={contextText}
+              onStart={(opts) => {
+                void startRecording(opts.captureMode, transcriptionEngine, opts.mode);
+              }}
+              onStop={stopRecording}
+              onModeChange={setActiveSessionMode}
+            />
+          </div>
 
         {!selectedNote ? (
           <section className="note-empty-panel">
@@ -2772,7 +2868,10 @@ export default function App() {
         ) : showInterviewNoteView ? (
           <section className="interview-chat-screen" aria-live="polite">
             <header className="interview-chat-header">
-              <h3>Interview Conversation</h3>
+              <div className="interview-chat-header__title">
+                <h3>Interview Conversation</h3>
+                <p>{title.trim() || 'Live interview note'}</p>
+              </div>
               <div className="interview-chat-controls">
                 <button
                   type="button"
@@ -2869,10 +2968,38 @@ export default function App() {
           </section>
         ) : showTranscriptNoteView ? (
           <TranscriptSessionView
+            title={title}
             transcript={transcriptViewText}
             segments={transcriptViewSegments}
+            summary={noteSummary}
+            summaryBusy={busy && activeTransformAction === 'summarize'}
+            activeTab={transcriptViewTab}
             contextPreset={contextPreset}
             contextText={contextText}
+            connectedProviders={connectedProviders}
+            transcriptionEngine={transcriptionEngine}
+            transcriptionProvider={activeTranscriptionProvider}
+            transcriptionModel={activeTranscriptionModel}
+            transcriptionModels={transcriptionModelOptions}
+            transcriptionModelsLoading={transcriptionModelsLoading}
+            transcriptionModelsError={transcriptionModelsError}
+            copilotProvider={copilotProvider}
+            copilotModel={copilotModel}
+            copilotModels={copilotModelOptions}
+            copilotModelsLoading={copilotModelsLoading}
+            copilotModelsError={copilotModelsError}
+            onTranscriptionEngineChange={handleTranscriptionEngineChange}
+            onTranscriptionProviderChange={setLlmTranscriptionProvider}
+            onTranscriptionModelChange={(model) => {
+              if (transcriptionEngine === 'whisper') {
+                setWhisperTranscriptionModel(model);
+                return;
+              }
+              setLlmTranscriptionModel(model);
+            }}
+            onCopilotProviderChange={setCopilotProvider}
+            onCopilotModelChange={setCopilotModel}
+            onTabChange={setTranscriptViewTab}
           />
         ) : showMarkdownPreview ? (
           <section className="note-preview-panel">
@@ -2903,7 +3030,9 @@ export default function App() {
           <AIActionPanel
             output={aiOutput}
             running={busy}
+            runningAction={activeTransformAction}
             onRun={(action) => void runTransform(action)}
+            onStopTransform={() => transformAbortRef.current?.abort()}
             transcriptChatEnabled={showCopilotChat}
             chatDraft={copilotChatDraft}
             chatHistory={copilotChatHistory}
@@ -2912,6 +3041,7 @@ export default function App() {
             onSendChat={() => {
               void runCopilotChat();
             }}
+            onStopChat={() => copilotChatAbortRef.current?.abort()}
             onClearChat={() => {
               setCopilotChatHistory([]);
               setCopilotChatDraft('');
@@ -2930,9 +3060,14 @@ export default function App() {
       {pendingDelete ? (
         <div className="undo-toast" role="status" aria-live="polite">
           <span>{pendingDelete.note.frontmatter.title || 'Untitled note'} deleted.</span>
-          <button type="button" className="ghost-btn" onClick={undoDeleteNote}>
-            Undo
-          </button>
+          <div className="undo-toast__actions">
+            <button type="button" className="ghost-btn" onClick={undoDeleteNote}>
+              Undo
+            </button>
+            <button type="button" className="ghost-btn ghost-btn--icon" onClick={dismissPendingDelete} aria-label="Dismiss delete message">
+              <X size={14} />
+            </button>
+          </div>
         </div>
       ) : null}
 

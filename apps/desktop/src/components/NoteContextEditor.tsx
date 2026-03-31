@@ -1,5 +1,7 @@
 import type { NoteContextPreset } from '@notebook-ai/contracts';
 
+import { Target } from 'lucide-react';
+
 import { NOTE_CONTEXT_PRESETS } from '../lib/noteMetadata';
 
 const PRESET_LABELS: Record<NoteContextPreset, { label: string; hint: string; placeholder: string }> = {
@@ -37,28 +39,29 @@ export function NoteContextEditor({ preset, text, onPresetChange, onTextChange }
 
   return (
     <section className="context-editor" aria-label="Note context">
-      <div className="context-editor__header">
-        <span className="context-editor__label">Context</span>
-        <span className="context-editor__hint">{copy.hint}</span>
+      <div className="metadata-icon-wrapper" aria-hidden="true" title={copy.hint}>
+        <Target size={14} />
       </div>
-      <div className="context-editor__presets" role="tablist" aria-label="Context presets">
-        {NOTE_CONTEXT_PRESETS.map((candidate) => (
-          <button
-            key={candidate}
-            type="button"
-            className={`context-editor__preset${candidate === preset ? ' active' : ''}`}
-            onClick={() => onPresetChange(candidate)}
-          >
-            {PRESET_LABELS[candidate].label}
-          </button>
-        ))}
+      <div className="context-editor__surface">
+        <div className="context-editor__presets" role="tablist" aria-label="Context presets">
+          {NOTE_CONTEXT_PRESETS.map((candidate) => (
+            <button
+              key={candidate}
+              type="button"
+              className={`context-editor__preset${candidate === preset ? ' active' : ''}`}
+              onClick={() => onPresetChange(candidate)}
+            >
+              {PRESET_LABELS[candidate].label}
+            </button>
+          ))}
+        </div>
+        <input
+          value={text}
+          onChange={(event) => onTextChange(event.target.value)}
+          className="context-editor__input"
+          placeholder={copy.placeholder}
+        />
       </div>
-      <input
-        value={text}
-        onChange={(event) => onTextChange(event.target.value)}
-        className="context-editor__input"
-        placeholder={copy.placeholder}
-      />
     </section>
   );
 }

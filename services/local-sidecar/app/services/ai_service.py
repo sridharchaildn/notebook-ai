@@ -265,12 +265,12 @@ def _build_prompts(payload: AITransformRequest) -> tuple[str, str]:
     context_block = _build_note_context_block(payload.note_context)
     if payload.transform == "summarize":
         system = (
-            "You are a precise note assistant. Produce concise, high-signal summaries "
-            "with clear bullet points and no fluff. When source hints are available, "
-            "preserve who said what."
+            "You are a precise note assistant. Produce a concise, high-signal summary "
+            "with short bullets and no preamble. Start immediately with the summary. "
+            "When source hints are available, preserve who said what."
         )
         user = (
-            "Summarize this note in 5-8 bullets.\n\n"
+            "Summarize this note in 4-6 short bullets.\n\n"
             f"{context_block}"
             f"Note content:\n{payload.content}"
         )
@@ -394,6 +394,8 @@ def _build_note_context_block(note_context: NoteAIContext | None) -> str:
         parts.append(f"Context preset: {note_context.context_preset}")
     if note_context.context_text and note_context.context_text.strip():
         parts.append(f"User context: {note_context.context_text.strip()}")
+    if note_context.summary and note_context.summary.strip():
+        parts.append(f"Existing summary: {note_context.summary.strip()}")
     if note_context.transcript_segments:
         parts.append("Source-aware transcript segments:")
         for segment in note_context.transcript_segments[:24]:

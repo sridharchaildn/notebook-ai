@@ -535,10 +535,12 @@ export async function streamTransform(
   provider?: ProviderId,
   model?: string,
   noteContext?: NoteAIContext | null,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/transform/stream`, {
     method: 'POST',
     headers: await localAuthHeaders('json'),
+    signal,
     body: JSON.stringify({
       note_id: noteId,
       content,
@@ -560,10 +562,12 @@ export async function streamTransform(
 export async function streamCopilotChat(
   payload: CopilotChatRequest,
   onToken: (chunk: string) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${LOCAL_BASE_URL}/ai/copilot/chat/stream`, {
     method: 'POST',
     headers: await localAuthHeaders('json'),
+    signal,
     body: JSON.stringify(payload),
   });
 

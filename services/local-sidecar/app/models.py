@@ -55,6 +55,7 @@ class TranscriptSessionData(BaseModel):
     session_type: Literal["transcript"] = "transcript"
     transcript: str = ""
     segments: list[TranscriptSegment] = Field(default_factory=list)
+    summary: str | None = None
     last_updated_at: datetime | None = None
 
 
@@ -63,6 +64,7 @@ class InterviewSessionData(BaseModel):
     transcript: str = ""
     guidance: str = ""
     turns: list[InterviewTurn] = Field(default_factory=list)
+    summary: str | None = None
     last_coached_interviewer_turn_id: str | None = None
     last_updated_at: datetime | None = None
 
@@ -134,6 +136,7 @@ class NoteAIContext(BaseModel):
     context_preset: NoteContextPreset | None = None
     context_text: str | None = None
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
+    summary: str | None = None
 
 
 class AITransformRequest(BaseModel):

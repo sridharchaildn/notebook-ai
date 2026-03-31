@@ -23,8 +23,8 @@ export function removeTag(existing: string[], target: string): string[] {
 
 export function sourceHintLabel(sourceHint: SourceHint | null | undefined): string {
   if (sourceHint === 'me') return 'Me';
-  if (sourceHint === 'other_audio') return 'Other audio';
-  return 'Unknown source';
+  if (sourceHint === 'other_audio') return 'Speaker';
+  return 'Speaker';
 }
 
 export function buildTranscriptFromSegments(

@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { Tag, X } from 'lucide-react';
 import type { KeyboardEvent } from 'react';
 
 interface Props {
@@ -32,7 +32,9 @@ export function TagEditor({
 
   return (
     <label className="tag-editor" aria-label="Tags">
-      <span className="tag-editor__label">Tags</span>
+      <div className="metadata-icon-wrapper" aria-hidden="true">
+        <Tag size={14} />
+      </div>
       <div className="tag-editor__surface">
         {tags.map((tag) => (
           <span key={tag.toLowerCase()} className="tag-chip">

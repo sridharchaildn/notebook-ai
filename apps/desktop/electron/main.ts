@@ -4,6 +4,7 @@ import {
   desktopCapturer,
   dialog,
   ipcMain,
+  nativeImage,
   safeStorage,
   session,
   shell,
@@ -37,6 +38,7 @@ const DESKTOP_SUPABASE_STORAGE_KEY = 'notebook-ai-desktop-auth';
 const DESKTOP_PENDING_AUTH_KEY = 'notebook-ai-desktop-auth-pending';
 const RENDERER_AUTH_SESSION_KEY = 'notebook-desktop-renderer-session';
 const RENDERER_AUTH_SESSION_EVENT = 'notebook:main-auth-session';
+const APP_DISPLAY_NAME = 'Notebook AI';
 
 interface StoredSupabaseSession {
   accessToken: string;
@@ -64,6 +66,34 @@ let cloudApiProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
 const pendingDeepLinks: string[] = [];
 let cachedAuthState: PersistedAuthState | null = null;
+
+function createNotebookAppIcon() {
+  const candidatePaths = [
+    path.join(__dirname, '../assets/icon.svg'),
+    path.join(process.cwd(), 'apps/desktop/assets/icon.svg'),
+  ];
+
+  for (const candidate of candidatePaths) {
+    if (!fs.existsSync(candidate)) continue;
+    const image = nativeImage.createFromPath(candidate);
+    if (!image.isEmpty()) {
+      const resized = image.resize({ width: 256, height: 256 });
+      return nativeImage.createFromBuffer(resized.toPNG());
+    }
+  }
+
+  const fallbackSvg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+      <rect x="20" y="20" width="216" height="216" rx="56" fill="#171717" />
+      <path d="M62 68h52c23 0 42 19 42 42v92c-8-10-19-15-34-15H62z" fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M194 68h-52c-23 0-42 19-42 42v92c8-10 19-15 34-15h60z" fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `.trim();
+  const fallback = nativeImage
+    .createFromDataURL(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(fallbackSvg)}`)
+    .resize({ width: 256, height: 256 });
+  return nativeImage.createFromBuffer(fallback.toPNG());
+}
 
 function isPortOpen(port: number, host = '127.0.0.1') {
   return new Promise<boolean>((resolve) => {
@@ -577,13 +607,16 @@ function createWindow() {
   const preloadJs = path.join(__dirname, 'preload.js');
   const preloadPath = fs.existsSync(preloadMjs) ? preloadMjs : preloadJs;
 
+  const appIcon = createNotebookAppIcon();
   const window = new BrowserWindow({
     width: 1460,
     height: 960,
     minWidth: 1180,
     minHeight: 760,
+    title: APP_DISPLAY_NAME,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0A1110',
+    icon: appIcon,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -728,6 +761,10 @@ app.on('open-url', (event, url) => {
 });
 
 app.whenReady().then(async () => {
+  app.setName(APP_DISPLAY_NAME);
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(createNotebookAppIcon());
+  }
   registerDeepLinkProtocol();
 
   await Promise.all([startSidecar(), startCloudApi()]);
@@ -840,6 +877,9 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(createNotebookAppIcon());
+  }
   const launchDeepLink = process.argv.find((arg) => arg.startsWith('notebook-ai://'));
   if (launchDeepLink) {
     handleAuthCallbackUrl(launchDeepLink);
