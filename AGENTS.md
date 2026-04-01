@@ -26,8 +26,9 @@ This file defines the repo-wide architecture rules for Notebook AI. App-specific
 
 ## Storage Rules
 
-- Native app-owned note/session storage is structured JSON text, not raw markdown.
-- Markdown is import/export and preview-only. It is not the primary in-app editing model.
+- Native app-owned note/session storage uses markdown bodies plus small JSON sidecars for metadata.
+- Markdown bodies are canonical for authored note, transcript, summary, and guidance documents.
+- Small JSON sidecars may store metadata, indexes, folder information, and structured session details.
 - Storage serialization format must never leak directly into the primary UI.
 - Transcript and interview surfaces must render structured views, not raw markdown or raw JSON.
 - `desktop_local_only` workspaces stay desktop-only. Cross-platform access requires Drive-shared workspaces.

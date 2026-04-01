@@ -4,7 +4,8 @@
     {
       "id": "summarize",
       "label": "Summarize",
-      "output_mode": "plain_text"
+      "output_mode": "plain_text",
+      "formats": ["meeting_brief", "decision_log", "interview_debrief", "research_capture"]
     },
     {
       "id": "rewrite",
@@ -14,7 +15,8 @@
     {
       "id": "extract_action_items",
       "label": "Extract action items",
-      "output_mode": "plain_text"
+      "output_mode": "plain_text",
+      "formats": ["action_tracker"]
     },
     {
       "id": "interview_turns",

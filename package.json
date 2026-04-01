@@ -15,7 +15,11 @@
     "dev:services": "concurrently -n sidecar,cloud -c blue,magenta \"npm run dev:sidecar\" \"npm run dev:cloud\"",
     "build:desktop": "npm --workspace @notebook-ai/desktop run build",
     "build:web": "npm --workspace @notebook-ai/web run build",
-    "test:desktop": "npm --workspace @notebook-ai/desktop run test"
+    "test:desktop": "npm --workspace @notebook-ai/desktop run test",
+    "version:sync": "node scripts/release/sync-version.mjs",
+    "release:notes": "node scripts/release/generate-release-notes.mjs",
+    "release:sidecar:mac": "bash scripts/release/build-local-sidecar-macos.sh",
+    "release:desktop:mac": "bash scripts/release/package-desktop-macos.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

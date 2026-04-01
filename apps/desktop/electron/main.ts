@@ -18,10 +18,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_PACKAGED_CLOUD_API_URL = 'https://api.notebook-ai.app';
 const CLOUD_API_URL =
   process.env.NOTEBOOK_CLOUD_API_URL ??
   process.env.VITE_CLOUD_API_URL ??
-  'http://127.0.0.1:8790';
+  (app.isPackaged ? DEFAULT_PACKAGED_CLOUD_API_URL : 'http://127.0.0.1:8790');
 const SUPABASE_URL =
   import.meta.env.VITE_SUPABASE_URL ??
   process.env.VITE_SUPABASE_URL ??
@@ -36,9 +37,19 @@ const DESKTOP_AUTH_CALLBACK_URL =
   'notebook-ai://auth/callback';
 const DESKTOP_SUPABASE_STORAGE_KEY = 'notebook-ai-desktop-auth';
 const DESKTOP_PENDING_AUTH_KEY = 'notebook-ai-desktop-auth-pending';
-const RENDERER_AUTH_SESSION_KEY = 'notebook-desktop-renderer-session';
-const RENDERER_AUTH_SESSION_EVENT = 'notebook:main-auth-session';
 const APP_DISPLAY_NAME = 'Notebook AI';
+const SIDE_CAR_ALLOWED_ORIGINS = [
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+  'null',
+].join(',');
+const CLOUD_ALLOWED_ORIGINS = [
+  'http://127.0.0.1:3000',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+  'null',
+].join(',');
 
 interface StoredSupabaseSession {
   accessToken: string;
@@ -61,11 +72,19 @@ interface DesktopRendererSession {
   userEmail: string | null;
 }
 
+interface DesktopAppInfo {
+  version: string;
+  buildVersion: string;
+  isPackaged: boolean;
+  platform: NodeJS.Platform;
+}
+
 let sidecarProcess: ChildProcess | null = null;
 let cloudApiProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
 const pendingDeepLinks: string[] = [];
 let cachedAuthState: PersistedAuthState | null = null;
+let cachedDesktopClientToken: string | null = null;
 
 function createNotebookAppIcon() {
   const candidatePaths = [
@@ -111,6 +130,14 @@ function isPortOpen(port: number, host = '127.0.0.1') {
 
 function authStatePath() {
   return path.join(app.getPath('userData'), 'auth-state.bin');
+}
+
+function desktopClientTokenPath() {
+  return path.join(app.getPath('userData'), 'desktop-client-token.bin');
+}
+
+function desktopClientTokenFallbackPath() {
+  return path.join(app.getPath('userData'), 'desktop-client-token.txt');
 }
 
 function cloneAuthState(state: PersistedAuthState): PersistedAuthState {
@@ -167,6 +194,61 @@ function writePersistedAuthState(nextState: PersistedAuthState) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const encrypted = safeStorage.encryptString(JSON.stringify(nextState));
   fs.writeFileSync(filePath, encrypted);
+}
+
+function readOrCreateDesktopClientToken(): string {
+  if (cachedDesktopClientToken) return cachedDesktopClientToken;
+
+  const encryptedPath = desktopClientTokenPath();
+  const fallbackPath = desktopClientTokenFallbackPath();
+
+  try {
+    if (safeStorage.isEncryptionAvailable() && fs.existsSync(encryptedPath)) {
+      const encrypted = fs.readFileSync(encryptedPath);
+      const decrypted = safeStorage.decryptString(encrypted).trim();
+      if (decrypted) {
+        cachedDesktopClientToken = decrypted;
+        return decrypted;
+      }
+    }
+
+    if (fs.existsSync(fallbackPath)) {
+      const raw = fs.readFileSync(fallbackPath, 'utf8').trim();
+      if (raw) {
+        cachedDesktopClientToken = raw;
+        return raw;
+      }
+    }
+  } catch {
+    /* ignore corrupted token state and rotate below */
+  }
+
+  const created = randomBytes(32).toString('hex');
+  fs.mkdirSync(path.dirname(encryptedPath), { recursive: true });
+  if (safeStorage.isEncryptionAvailable()) {
+    fs.writeFileSync(encryptedPath, safeStorage.encryptString(created));
+    if (fs.existsSync(fallbackPath)) {
+      fs.rmSync(fallbackPath, { force: true });
+    }
+  } else {
+    fs.writeFileSync(fallbackPath, created, { mode: 0o600 });
+  }
+
+  cachedDesktopClientToken = created;
+  return created;
+}
+
+function desktopBuildVersion(): string {
+  return process.env.NOTEBOOK_BUILD_VERSION?.trim() || app.getVersion();
+}
+
+function getDesktopAppInfo(): DesktopAppInfo {
+  return {
+    version: app.getVersion(),
+    buildVersion: desktopBuildVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+  };
 }
 
 function normalizeStoredSession(payload: unknown): StoredSupabaseSession | null {
@@ -449,29 +531,9 @@ function toRendererSession(session: StoredSupabaseSession | null): DesktopRender
   };
 }
 
-function syncSessionIntoRenderer(rendererSession: DesktopRendererSession | null) {
+function emitSessionUpdated(rendererSession: DesktopRendererSession | null) {
   if (!mainWindow) return;
-  const sessionJson = JSON.stringify(rendererSession);
-  const storageKeyJson = JSON.stringify(RENDERER_AUTH_SESSION_KEY);
-  const eventNameJson = JSON.stringify(RENDERER_AUTH_SESSION_EVENT);
-  const script = `(() => {
-    const session = ${sessionJson};
-    const storageKey = ${storageKeyJson};
-    const eventName = ${eventNameJson};
-    try {
-      if (session) {
-        window.localStorage.setItem(storageKey, JSON.stringify(session));
-      } else {
-        window.localStorage.removeItem(storageKey);
-      }
-      window.dispatchEvent(new CustomEvent(eventName, { detail: session }));
-    } catch {
-      /* ignore renderer sync errors */
-    }
-  })();`;
-  void mainWindow.webContents.executeJavaScript(script).catch(() => {
-    /* ignore renderer sync errors */
-  });
+  mainWindow.webContents.send('auth:session-updated', rendererSession);
 }
 
 function shouldRefreshSession(session: StoredSupabaseSession): boolean {
@@ -531,17 +593,48 @@ async function startSidecar() {
 
   const devRoot = path.resolve(__dirname, '../../..');
   const sidecarCwd = path.resolve(devRoot, 'services/local-sidecar');
-  const sidecarVenvPython = path.join(sidecarCwd, '.venv/bin/python');
-  const defaultSidecarCommand = fs.existsSync(sidecarVenvPython)
-    ? `${sidecarVenvPython} -m uvicorn app.main:app --host 127.0.0.1 --port 8787`
-    : 'python3.11 -m uvicorn app.main:app --host 127.0.0.1 --port 8787';
-  const sidecarCommand = process.env.NOTEBOOK_LOCAL_SIDECAR_CMD ?? defaultSidecarCommand;
+  const desktopToken = readOrCreateDesktopClientToken();
+  const sidecarEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    NOTEBOOK_LOCAL_ALLOWED_ORIGINS:
+      process.env.NOTEBOOK_LOCAL_ALLOWED_ORIGINS ?? SIDE_CAR_ALLOWED_ORIGINS,
+    NOTEBOOK_LOCAL_APP_VERSION: app.getVersion(),
+    NOTEBOOK_LOCAL_BUILD_VERSION: desktopBuildVersion(),
+    NOTEBOOK_LOCAL_CLOUD_API_URL: CLOUD_API_URL,
+    NOTEBOOK_LOCAL_DESKTOP_TOKEN: desktopToken,
+  };
 
-  sidecarProcess = spawn(sidecarCommand, {
-    cwd: sidecarCwd,
-    shell: true,
-    stdio: 'pipe',
-  });
+  const bundledSidecar = process.platform === 'darwin'
+    ? path.join(process.resourcesPath, 'local-sidecar', 'notebook-ai-local-sidecar')
+    : path.join(process.resourcesPath, 'local-sidecar', 'notebook-ai-local-sidecar.exe');
+  const bundledFfmpeg = process.platform === 'darwin'
+    ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg')
+    : path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe');
+  if (app.isPackaged) {
+    if (!fs.existsSync(bundledSidecar)) {
+      throw new Error(`Packaged sidecar binary not found: ${bundledSidecar}`);
+    }
+    if (fs.existsSync(bundledFfmpeg)) {
+      sidecarEnv.NOTEBOOK_LOCAL_FFMPEG_PATH = bundledFfmpeg;
+    }
+    sidecarProcess = spawn(bundledSidecar, [], {
+      env: sidecarEnv,
+      stdio: 'pipe',
+    });
+  } else {
+    const sidecarVenvPython = path.join(sidecarCwd, '.venv/bin/python');
+    const defaultSidecarCommand = fs.existsSync(sidecarVenvPython)
+      ? `${sidecarVenvPython} -m uvicorn app.main:app --host 127.0.0.1 --port 8787`
+      : 'python3.11 -m uvicorn app.main:app --host 127.0.0.1 --port 8787';
+    const sidecarCommand = process.env.NOTEBOOK_LOCAL_SIDECAR_CMD ?? defaultSidecarCommand;
+
+    sidecarProcess = spawn(sidecarCommand, {
+      cwd: sidecarCwd,
+      env: sidecarEnv,
+      shell: true,
+      stdio: 'pipe',
+    });
+  }
 
   sidecarProcess.stdout?.on('data', (chunk) => {
     process.stdout.write(`[sidecar] ${chunk.toString()}`);
@@ -557,6 +650,10 @@ async function startSidecar() {
 }
 
 async function startCloudApi() {
+  if (app.isPackaged) {
+    process.stdout.write('[cloud-api] Packaged desktop expects a hosted cloud API; skipping local spawn\n');
+    return;
+  }
   if (cloudApiProcess) return;
   if (await isPortOpen(8790)) {
     process.stdout.write('[cloud-api] Reusing existing service on 127.0.0.1:8790\n');
@@ -571,8 +668,17 @@ async function startCloudApi() {
     : 'python3.11 -m uvicorn app.main:app --host 127.0.0.1 --port 8790';
   const cloudCommand = process.env.NOTEBOOK_CLOUD_API_CMD ?? defaultCloudCommand;
 
+  const cloudEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    NOTEBOOK_CLOUD_ALLOWED_ORIGINS:
+      process.env.NOTEBOOK_CLOUD_ALLOWED_ORIGINS ?? CLOUD_ALLOWED_ORIGINS,
+    NOTEBOOK_CLOUD_APP_VERSION: app.getVersion(),
+    NOTEBOOK_CLOUD_BUILD_VERSION: desktopBuildVersion(),
+  };
+
   cloudApiProcess = spawn(cloudCommand, {
     cwd: cloudCwd,
+    env: cloudEnv,
     shell: true,
     stdio: 'pipe',
   });
@@ -621,7 +727,7 @@ function createWindow() {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   });
 
@@ -633,17 +739,21 @@ function createWindow() {
 
   window.webContents.on('did-finish-load', () => {
     void getStoredSessionForRenderer().then((session) => {
-      syncSessionIntoRenderer(session);
+      emitSessionUpdated(session);
     });
     flushPendingDeepLinks();
   });
 
+  window.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
+  });
+
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) {
+    if (isAllowedExternalUrl(url)) {
       void openUrlOutsideApp(url);
       return { action: 'deny' };
     }
-    return { action: 'allow' };
+    return { action: 'deny' };
   });
 
   window.on('closed', () => {
@@ -670,9 +780,8 @@ function handleAuthCallbackUrl(rawUrl: string) {
         if (mainWindow.isMinimized()) mainWindow.restore();
         mainWindow.focus();
         const rendererSession = toRendererSession(session);
-        mainWindow.webContents.send('auth:session-updated', rendererSession);
+        emitSessionUpdated(rendererSession);
         mainWindow.webContents.send('auth:callback-url', rawUrl);
-        syncSessionIntoRenderer(rendererSession);
       }
       return;
     }
@@ -703,6 +812,9 @@ function focusOrCreateMainWindow() {
 }
 
 async function openUrlOutsideApp(url: string) {
+  if (!isAllowedExternalUrl(url)) {
+    throw new Error('Blocked unsupported external URL.');
+  }
   try {
     await shell.openExternal(url);
     return;
@@ -720,6 +832,23 @@ async function openUrlOutsideApp(url: string) {
       }
     }
     throw error;
+  }
+}
+
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'https:') return true;
+    if (
+      !app.isPackaged &&
+      parsed.protocol === 'http:' &&
+      (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost')
+    ) {
+      return true;
+    }
+    return parsed.protocol === 'notebook-ai:';
+  } catch {
+    return false;
   }
 }
 
@@ -794,6 +923,9 @@ app.whenReady().then(async () => {
     await openUrlOutsideApp(url);
   });
 
+  ipcMain.handle('app:get-info', async () => getDesktopAppInfo());
+  ipcMain.handle('app:get-local-api-token', async () => readOrCreateDesktopClientToken());
+
   ipcMain.handle('app:choose-directory', async () => {
     const browser = BrowserWindow.getFocusedWindow() ?? mainWindow;
     const options: OpenDialogOptions = { properties: ['openDirectory', 'createDirectory'] };
@@ -825,14 +957,14 @@ app.whenReady().then(async () => {
       session: sessionToPersist,
     });
     const rendererSession = toRendererSession(sessionToPersist);
-    syncSessionIntoRenderer(rendererSession);
+    emitSessionUpdated(rendererSession);
     return rendererSession;
   });
 
   ipcMain.handle('auth:clear-session', async () => {
     const authState = readPersistedAuthState();
     writePersistedAuthState({ ...authState, session: null, authStorage: {} });
-    syncSessionIntoRenderer(null);
+    emitSessionUpdated(null);
     return null;
   });
 

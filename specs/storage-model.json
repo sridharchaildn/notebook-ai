@@ -1,7 +1,17 @@
 {
-  "version": 1,
+  "version": 2,
   "default_note_extension": ".note.json",
   "legacy_extensions": [".md"],
+  "local_bundle_layout": {
+    "unfiled_root": "unfiled",
+    "folders_root": "folders",
+    "folder_meta_filename": "_folder.json",
+    "note_meta_filename": "_meta.json",
+    "note_body_filename": "note.md",
+    "transcript_body_filename": "transcript.md",
+    "summary_body_filename": "summary.md",
+    "guidance_body_filename": "guidance.md"
+  },
   "workspace_kinds": ["desktop_local_only", "drive_shared"],
   "content_formats": ["plain_text", "markdown"],
   "context_presets": ["meeting", "podcast", "youtube", "custom"],

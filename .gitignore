@@ -22,3 +22,6 @@ coverage/
 # Next.js (apps/web)
 apps/web/.next/
 apps/web/.vercel/
+dist-sidecar/
+.tmp/
+apps/desktop/release/

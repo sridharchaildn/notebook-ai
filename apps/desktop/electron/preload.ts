@@ -7,8 +7,17 @@ interface DesktopRendererSession {
   userEmail: string | null;
 }
 
+interface DesktopAppInfo {
+  version: string;
+  buildVersion: string;
+  isPackaged: boolean;
+  platform: string;
+}
+
 contextBridge.exposeInMainWorld('notebookDesktop', {
   openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url),
+  getAppInfo: () => ipcRenderer.invoke('app:get-info') as Promise<DesktopAppInfo>,
+  getLocalApiToken: () => ipcRenderer.invoke('app:get-local-api-token') as Promise<string>,
   chooseDirectory: () => ipcRenderer.invoke('app:choose-directory') as Promise<string | null>,
   consumeAuthCallback: () => ipcRenderer.invoke('auth:consume-callback-url') as Promise<string | null>,
   getAuthSession: () => ipcRenderer.invoke('auth:get-session') as Promise<DesktopRendererSession | null>,
@@ -43,6 +52,8 @@ declare global {
   interface Window {
     notebookDesktop: {
       openExternal: (url: string) => Promise<void>;
+      getAppInfo: () => Promise<DesktopAppInfo>;
+      getLocalApiToken: () => Promise<string>;
       chooseDirectory: () => Promise<string | null>;
       consumeAuthCallback: () => Promise<string | null>;
       getAuthSession: () => Promise<DesktopRendererSession | null>;

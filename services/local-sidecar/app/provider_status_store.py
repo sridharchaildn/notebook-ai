@@ -19,42 +19,63 @@ class ProviderStatusStore:
         openrouter_key: str | None,
     ) -> list[ProviderConnection]:
         profile = self._load_profile()
-        now = datetime.now(timezone.utc)
 
         results: list[ProviderConnection] = []
         for provider in ("openai", "openrouter"):
             cached = profile.get(provider, {})
-            connected = bool(cached.get("connected", False))
-            via = str(cached.get("via", "none"))
+            stored_key = str(cached.get("api_key") or "").strip()
+            env_key = self.get_api_key(provider, openai_key, openrouter_key)
+            connected = bool(env_key or stored_key)
+            via = "api_key" if connected else "none"
+            scope = "desktop_local" if connected else "none"
             last_updated = cached.get("last_updated_at")
-
-            if provider == "openai" and openai_key:
-                connected, via = True, "api_key"
-            if provider == "openrouter" and openrouter_key:
-                connected, via = True, "api_key"
-
-            if not connected:
-                via = "none"
 
             results.append(
                 ProviderConnection(
                     provider=provider,
                     connected=connected,
                     via=via,
-                    last_updated_at=_parse_datetime(last_updated) if last_updated else now,
+                    scope=scope,
+                    last_updated_at=_parse_datetime(last_updated) if last_updated else None,
                 )
             )
 
         return results
 
-    def cache_status(self, provider: str, via: str, connected: bool = True) -> None:
+    def save_api_key(self, provider: str, api_key: str) -> None:
         profile = self._load_profile()
         profile[provider] = {
-            "connected": connected,
-            "via": via if connected else "none",
+            "api_key": api_key,
+            "via": "api_key",
             "last_updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._write_profile(profile)
+
+    def delete_provider(self, provider: str) -> None:
+        profile = self._load_profile()
+        if provider in profile:
+            del profile[provider]
+            self._write_profile(profile)
+
+    def get_api_key(
+        self,
+        provider: str,
+        openai_key: str | None,
+        openrouter_key: str | None,
+    ) -> str | None:
+        if provider == "openai":
+            candidate = (openai_key or "").strip()
+            if candidate:
+                return candidate
+        if provider == "openrouter":
+            candidate = (openrouter_key or "").strip()
+            if candidate:
+                return candidate
+
+        profile = self._load_profile()
+        cached = profile.get(provider, {})
+        stored_key = str(cached.get("api_key") or "").strip()
+        return stored_key or None
 
     def _load_profile(self) -> dict:
         if not self.profile_path.exists():

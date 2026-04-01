@@ -1,8 +1,16 @@
-import type { ProviderConnection, ProviderId, ProviderModel, SyncStatus } from '@notebook-ai/contracts';
+import type {
+  MarkdownSettings,
+  ProviderConnection,
+  ProviderId,
+  ProviderModel,
+  SyncStatus,
+  TranscriptionPreferences,
+} from '@notebook-ai/contracts';
 import {
   CircleCheckBig,
   CircleDashed,
   Cloud,
+  FileText,
   Folder,
   FolderSync,
   HardDrive,
@@ -30,12 +38,23 @@ import {
   providerLabel,
 } from './ProviderModelPicker';
 
-type SettingsTab = 'general' | 'providers' | 'copilot' | 'transcription' | 'appearance' | 'shortcuts';
+type SettingsTab =
+  | 'general'
+  | 'providers'
+  | 'copilot'
+  | 'transcription'
+  | 'markdown'
+  | 'appearance'
+  | 'shortcuts';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   /* Provider props */
+  settingsFeedback: {
+    tone: 'success' | 'error';
+    message: string;
+  } | null;
   providers: ProviderConnection[];
   byokProvider: 'openai' | 'openrouter';
   byokValue: string;
@@ -43,7 +62,7 @@ interface Props {
   onByokProviderChange: (value: 'openai' | 'openrouter') => void;
   onByokValueChange: (value: string) => void;
   onSaveByok: () => void;
-  onOpenOAuth: () => void;
+  onClearSettingsFeedback: () => void;
   disconnectingProvider: ProviderId | null;
   onDisconnectProvider: (provider: ProviderId) => void;
   connectedProviders: ProviderId[];
@@ -73,6 +92,10 @@ interface Props {
   onChooseLocalFolder: () => void;
   onRunSyncNow: () => void;
   onLogout: () => void;
+  transcriptionPreferences: TranscriptionPreferences;
+  onTranscriptionPreferencesChange: (
+    patch: Partial<Omit<TranscriptionPreferences, 'updated_at'>>,
+  ) => void;
   transcriptionEngine: 'whisper' | 'llm';
   transcriptionProvider: ProviderId;
   transcriptionModel: string;
@@ -82,8 +105,11 @@ interface Props {
   onTranscriptionEngineChange: (engine: 'whisper' | 'llm') => void;
   onTranscriptionProviderChange: (provider: ProviderId) => void;
   onTranscriptionModelChange: (model: string) => void;
+  markdownSettings: MarkdownSettings;
+  onMarkdownSettingsChange: (patch: Partial<Omit<MarkdownSettings, 'updated_at'>>) => void;
   onConnectDrive: () => void;
   onRefreshDriveStatus: () => void;
+  buildVersion: string;
 }
 
 const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
@@ -91,13 +117,45 @@ const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
   { id: 'providers', label: 'AI Connection', icon: <Zap size={16} /> },
   { id: 'copilot', label: 'Copilot', icon: <Brain size={16} /> },
   { id: 'transcription', label: 'Transcription', icon: <Mic size={16} /> },
+  { id: 'markdown', label: 'Markdown', icon: <FileText size={16} /> },
   { id: 'appearance', label: 'Appearance', icon: <Palette size={16} /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={16} /> },
 ];
 
+function splitCommaSeparated(raw: string): string[] {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const value of raw.split(',')) {
+    const normalized = value.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(normalized);
+  }
+  return next;
+}
+
+function describeProviderConnection(entry: ProviderConnection): string {
+  if (!entry.connected) {
+    return 'No local key saved on this device.';
+  }
+
+  const viaLabel = entry.via === 'api_key' ? 'API key' : entry.via;
+  const scopeLabel =
+    entry.scope === 'desktop_local'
+      ? 'stored locally on this device'
+      : entry.scope === 'account_vault'
+        ? 'stored in your encrypted account vault'
+        : 'source unavailable';
+
+  return `Connected via ${viaLabel}; ${scopeLabel}.`;
+}
+
 export function SettingsModal({
   open,
   onClose,
+  settingsFeedback,
   providers,
   byokProvider,
   byokValue,
@@ -105,7 +163,7 @@ export function SettingsModal({
   onByokProviderChange,
   onByokValueChange,
   onSaveByok,
-  onOpenOAuth,
+  onClearSettingsFeedback,
   disconnectingProvider,
   onDisconnectProvider,
   connectedProviders,
@@ -133,6 +191,8 @@ export function SettingsModal({
   onChooseLocalFolder,
   onRunSyncNow,
   onLogout,
+  transcriptionPreferences,
+  onTranscriptionPreferencesChange,
   transcriptionEngine,
   transcriptionProvider,
   transcriptionModel,
@@ -142,8 +202,11 @@ export function SettingsModal({
   onTranscriptionEngineChange,
   onTranscriptionProviderChange,
   onTranscriptionModelChange,
+  markdownSettings,
+  onMarkdownSettingsChange,
   onConnectDrive,
   onRefreshDriveStatus,
+  buildVersion,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
   const progressPercent = syncProgressPercent(syncStatus);
@@ -179,13 +242,31 @@ export function SettingsModal({
 
         {/* Tab content */}
         <div className="settings-content">
+          {settingsFeedback ? (
+            <div
+              className={`settings-feedback settings-feedback--${settingsFeedback.tone}`}
+              role={settingsFeedback.tone === 'error' ? 'alert' : 'status'}
+              aria-live="polite"
+            >
+              <span className="settings-feedback__text">{settingsFeedback.message}</span>
+              <button
+                type="button"
+                className="settings-feedback__dismiss"
+                onClick={onClearSettingsFeedback}
+                aria-label="Dismiss settings message"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
           {activeTab === 'providers' && (
             <>
               <h3>Connected Providers</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', margin: '0 0 12px' }}>
-                Disconnect removes the saved key or OAuth token from the cloud vault and clears the local
-                cache. Keys set only in the sidecar <code style={{ fontSize: '0.75rem' }}>.env</code> still
-                count as connected until you remove them there.
+                Desktop AI keys are stored locally on this device. They are not synced to your
+                account, and if you uninstall the app or move devices you will need to enter them
+                again. Keys set in the sidecar <code style={{ fontSize: '0.75rem' }}>.env</code> also
+                count as local device credentials.
               </p>
               <div className="provider-status-grid">
                 {providers.map((entry) => (
@@ -206,9 +287,7 @@ export function SettingsModal({
                       )}
                     </div>
                     <small>
-                      {entry.connected
-                        ? `Connected via ${entry.via}`
-                        : 'No active connection'}
+                      {describeProviderConnection(entry)}
                     </small>
                     {entry.connected ? (
                       <div className="provider-chip__actions">
@@ -227,17 +306,11 @@ export function SettingsModal({
                 ))}
               </div>
 
-              <h3>Add Provider</h3>
-              <div className="provider-actions">
-                <button type="button" className="cta-btn" onClick={onOpenOAuth} style={{ width: '100%', justifyContent: 'center' }}>
-                  <Link size={15} />
-                  Connect via OAuth
-                </button>
-              </div>
-
-              <div className="settings-divider">or</div>
-
               <h3>Bring Your Own Key</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', margin: '0 0 12px' }}>
+                Save a provider key locally for this desktop install only. Web and future mobile apps
+                use the encrypted account vault instead.
+              </p>
               <div className="byok-form">
                 <label>
                   Provider
@@ -629,6 +702,104 @@ export function SettingsModal({
                 ) : (
                   <small>Detailed Mode can use OpenAI or OpenRouter audio-capable models.</small>
                 )}
+
+                <label>
+                  Primary language
+                  <input
+                    type="text"
+                    value={transcriptionPreferences.main_language}
+                    onChange={(event) =>
+                      onTranscriptionPreferencesChange({
+                        main_language: event.target.value.trim() || 'auto',
+                      })
+                    }
+                    placeholder="auto, en, es, hi..."
+                  />
+                </label>
+
+                <label>
+                  Spoken languages
+                  <input
+                    type="text"
+                    value={transcriptionPreferences.spoken_languages.join(', ')}
+                    onChange={(event) =>
+                      onTranscriptionPreferencesChange({
+                        spoken_languages: splitCommaSeparated(event.target.value),
+                      })
+                    }
+                    placeholder="English, Spanish, Hindi"
+                  />
+                </label>
+
+                <label>
+                  Custom vocabulary
+                  <textarea
+                    value={transcriptionPreferences.custom_vocabulary.join(', ')}
+                    onChange={(event) =>
+                      onTranscriptionPreferencesChange({
+                        custom_vocabulary: splitCommaSeparated(event.target.value),
+                      })
+                    }
+                    placeholder="Customer names, product names, jargon"
+                    rows={3}
+                  />
+                </label>
+
+                <small>
+                  Language and vocabulary hints are stored locally and applied to live transcription.
+                </small>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'markdown' && (
+            <>
+              <h3>Markdown</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', marginBottom: '16px' }}>
+                Notebook AI stores authored note bodies as markdown-backed documents while keeping the main UI in rich rendered views.
+              </p>
+
+              <div className="byok-form">
+                <label>
+                  Editor surface
+                  <select
+                    value={markdownSettings.editor_mode}
+                    onChange={(event) =>
+                      onMarkdownSettingsChange({
+                        editor_mode: event.target.value as MarkdownSettings['editor_mode'],
+                      })
+                    }
+                  >
+                    <option value="rich_text">Rich text editor</option>
+                    <option value="preview">Preview first</option>
+                  </select>
+                </label>
+
+                <label className="settings-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={markdownSettings.enable_import}
+                    onChange={(event) =>
+                      onMarkdownSettingsChange({ enable_import: event.target.checked })
+                    }
+                  />
+                  <span>Allow markdown import</span>
+                </label>
+
+                <label className="settings-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={markdownSettings.enable_export}
+                    onChange={(event) =>
+                      onMarkdownSettingsChange({ enable_export: event.target.checked })
+                    }
+                  />
+                  <span>Allow markdown export</span>
+                </label>
+
+                <small>
+                  Source view stays hidden by default. These settings only control compatibility behavior and default rendered surfaces.
+                </small>
               </div>
             </>
           )}
@@ -645,7 +816,7 @@ export function SettingsModal({
 
         {/* Footer */}
         <div className="settings-footer">
-          <span className="settings-version">Notebook AI v0.4.0</span>
+          <span className="settings-version">Notebook AI v{buildVersion}</span>
           <button type="button" className="ghost-btn" onClick={onClose}>
             <X size={14} />
             Close

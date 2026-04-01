@@ -21,10 +21,6 @@ from .models import (
     GoogleDriveByokRequest,
     GoogleDriveFolderUpdateRequest,
     GoogleDriveTokenResponse,
-    LegalAcceptRequest,
-    LegalAcceptanceRecord,
-    LegalCurrentResponse,
-    LegalDocument,
     OAuthStartResponse,
     ProviderByokRequest,
     ProviderCredentialResponse,
@@ -47,24 +43,39 @@ def create_app(
     provider_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     current_settings = settings or Settings()
+    _validate_runtime_settings(current_settings)
     log = configure_cloud_logging(current_settings.debug)
     log.info("Cloud API starting (debug=%s)", current_settings.debug)
 
     current_store = store or SupabaseStore(current_settings)
     current_auth = auth_gateway or SupabaseAuthGateway(current_settings)
 
-    app = FastAPI(title="Notebook AI Cloud API", version="0.1.0")
+    app = FastAPI(title="Notebook AI Cloud API", version=current_settings.app_version)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=list(current_settings.allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
+
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, str | bool]:
+        return {
+            "status": "ok",
+            "service": "cloud-api",
+            "version": current_settings.app_version,
+            "build_version": current_settings.resolved_build_version,
+            "configured": True,
+        }
 
     @app.post("/auth/session/refresh", response_model=AuthRefreshResponse)
     async def auth_session_refresh(payload: AuthRefreshRequest) -> AuthRefreshResponse:
@@ -84,43 +95,6 @@ def create_app(
         except AuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         return AuthLogoutResponse(ok=True)
-
-    @app.get("/legal/current", response_model=LegalCurrentResponse)
-    async def legal_current() -> LegalCurrentResponse:
-        documents = [
-            LegalDocument(
-                type="privacy_policy",
-                version=current_settings.privacy_policy_version,
-                title="Privacy Policy",
-                url=current_settings.privacy_policy_url,
-            ),
-            LegalDocument(
-                type="user_agreement",
-                version=current_settings.user_agreement_version,
-                title="User Agreement",
-                url=current_settings.user_agreement_url,
-            ),
-        ]
-        return LegalCurrentResponse(documents=documents)
-
-    @app.post("/legal/accept", response_model=list[LegalAcceptanceRecord])
-    async def legal_accept(
-        payload: LegalAcceptRequest,
-        authorization: Annotated[str | None, Header()] = None,
-    ) -> list[LegalAcceptanceRecord]:
-        if len(payload.acceptances) == 0:
-            raise HTTPException(status_code=400, detail="acceptances must include at least one document")
-
-        user = await _require_user(current_auth, authorization)
-        accepted = [(item.type, item.version) for item in payload.acceptances]
-        return await current_store.save_legal_acceptances(user.id, accepted)
-
-    @app.get("/legal/accept", response_model=list[LegalAcceptanceRecord])
-    async def legal_accept_status(
-        authorization: Annotated[str | None, Header()] = None,
-    ) -> list[LegalAcceptanceRecord]:
-        user = await _require_user(current_auth, authorization)
-        return await current_store.list_legal_acceptances(user.id)
 
     @app.get("/settings/storage", response_model=StoragePreference)
     async def get_storage_preference(
@@ -172,12 +146,13 @@ def create_app(
     async def openai_oauth_start(
         authorization: Annotated[str | None, Header()] = None,
     ) -> OAuthStartResponse:
+        _require_openai_oauth_configuration(current_settings)
         user = await _require_user(current_auth, authorization)
         state = secrets.token_urlsafe(32)
         await current_store.save_oauth_state(state=state, user_id=user.id)
 
         params = {
-            "client_id": current_settings.openai_oauth_client_id or "notebook-ai-dev-client",
+            "client_id": current_settings.openai_oauth_client_id,
             "response_type": "code",
             "redirect_uri": current_settings.openai_oauth_redirect_uri,
             "scope": current_settings.openai_oauth_scope,
@@ -193,8 +168,11 @@ def create_app(
         state: str | None = Query(default=None),
         error: str | None = Query(default=None),
     ) -> HTMLResponse:
+        _require_openai_oauth_configuration(current_settings)
         if error:
             raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+        if not code:
+            raise HTTPException(status_code=400, detail="Missing OAuth code")
 
         if not state:
             raise HTTPException(status_code=400, detail="Missing OAuth state")
@@ -203,31 +181,19 @@ def create_app(
         if not user_id:
             raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
 
-        token_payload: dict[str, str] = {"provider": "openai"}
-        if (
-            code
-            and current_settings.openai_oauth_token_url
-            and current_settings.openai_oauth_client_id
-            and current_settings.openai_oauth_client_secret
-        ):
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.post(
-                    current_settings.openai_oauth_token_url,
-                    data={
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "client_id": current_settings.openai_oauth_client_id,
-                        "client_secret": current_settings.openai_oauth_client_secret,
-                        "redirect_uri": current_settings.openai_oauth_redirect_uri,
-                    },
-                )
-                response.raise_for_status()
-                token_payload = response.json()
-        else:
-            token_payload = {
-                "authorization_code": code or "dev-oauth-code",
-                "note": "Token endpoint not configured; stored callback payload for development.",
-            }
+        async with httpx.AsyncClient(timeout=20, transport=provider_transport) as client:
+            response = await client.post(
+                current_settings.openai_oauth_token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": current_settings.openai_oauth_client_id,
+                    "client_secret": current_settings.openai_oauth_client_secret,
+                    "redirect_uri": current_settings.openai_oauth_redirect_uri,
+                },
+            )
+            response.raise_for_status()
+            token_payload = response.json()
 
         encrypted = encrypt_secret(json.dumps(token_payload), current_settings.credential_secret)
         await current_store.upsert_credential(
@@ -251,12 +217,13 @@ def create_app(
     async def google_drive_oauth_start(
         authorization: Annotated[str | None, Header()] = None,
     ) -> OAuthStartResponse:
+        _require_google_drive_oauth_configuration(current_settings)
         user = await _require_user(current_auth, authorization)
         state = secrets.token_urlsafe(32)
         await current_store.save_oauth_state(state=state, user_id=user.id)
 
         params = {
-            "client_id": current_settings.google_drive_client_id or "notebook-ai-dev-client",
+            "client_id": current_settings.google_drive_client_id,
             "redirect_uri": current_settings.google_drive_redirect_uri,
             "response_type": "code",
             "scope": current_settings.google_drive_scope,
@@ -273,8 +240,11 @@ def create_app(
         state: str | None = Query(default=None),
         error: str | None = Query(default=None),
     ) -> HTMLResponse:
+        _require_google_drive_oauth_configuration(current_settings)
         if error:
             raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+        if not code:
+            raise HTTPException(status_code=400, detail="Missing OAuth code")
         if not state:
             raise HTTPException(status_code=400, detail="Missing OAuth state")
 
@@ -282,30 +252,20 @@ def create_app(
         if not user_id:
             raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
 
-        token_payload: dict[str, str] = {
-            "refresh_token": "dev-google-drive-token",
-            "folder_name": current_settings.google_drive_default_folder_name,
-        }
-        if (
-            code
-            and current_settings.google_drive_oauth_token_url
-            and current_settings.google_drive_client_id
-            and current_settings.google_drive_client_secret
-        ):
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.post(
-                    current_settings.google_drive_oauth_token_url,
-                    data={
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "client_id": current_settings.google_drive_client_id,
-                        "client_secret": current_settings.google_drive_client_secret,
-                        "redirect_uri": current_settings.google_drive_redirect_uri,
-                    },
-                )
-                response.raise_for_status()
-                token_payload = response.json()
-                token_payload["folder_name"] = current_settings.google_drive_default_folder_name
+        async with httpx.AsyncClient(timeout=20, transport=provider_transport) as client:
+            response = await client.post(
+                current_settings.google_drive_oauth_token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": current_settings.google_drive_client_id,
+                    "client_secret": current_settings.google_drive_client_secret,
+                    "redirect_uri": current_settings.google_drive_redirect_uri,
+                },
+            )
+            response.raise_for_status()
+            token_payload = response.json()
+            token_payload["folder_name"] = current_settings.google_drive_default_folder_name
 
         encrypted = encrypt_secret(json.dumps(token_payload), current_settings.credential_secret)
         await current_store.upsert_credential(
@@ -454,7 +414,7 @@ def create_app(
                 and current_settings.google_drive_client_id
                 and current_settings.google_drive_client_secret
             ):
-                async with httpx.AsyncClient(timeout=20) as client:
+                async with httpx.AsyncClient(timeout=20, transport=provider_transport) as client:
                     response = await client.post(
                         current_settings.google_drive_oauth_token_url,
                         data={
@@ -472,8 +432,6 @@ def create_app(
                     if refreshed.get("refresh_token"):
                         next_payload["refresh_token"] = refreshed["refresh_token"]
                     await _save_google_drive_payload(user.id, next_payload)
-            elif refresh_token and not token:
-                token = refresh_token
         elif isinstance(parsed, str):
             token = parsed
 
@@ -581,15 +539,45 @@ def create_app(
     return app
 
 
+def _validate_runtime_settings(settings: Settings) -> None:
+    if not settings.debug and settings.credential_secret == "dev-credential-secret":
+        raise RuntimeError("NOTEBOOK_CLOUD_CREDENTIAL_SECRET must be set before deploying the cloud API")
+
+
+def _require_openai_oauth_configuration(settings: Settings) -> None:
+    if (
+        not settings.openai_oauth_client_id
+        or not settings.openai_oauth_client_secret
+        or not settings.openai_oauth_token_url
+    ):
+        raise HTTPException(status_code=503, detail="OpenAI OAuth is not configured")
+
+
+def _require_google_drive_oauth_configuration(settings: Settings) -> None:
+    if (
+        not settings.google_drive_client_id
+        or not settings.google_drive_client_secret
+        or not settings.google_drive_oauth_token_url
+    ):
+        raise HTTPException(status_code=503, detail="Google Drive OAuth is not configured")
+
+
 def _create_default_app() -> FastAPI:
+    settings = Settings()
     try:
-        return create_app()
+        return create_app(settings)
     except RuntimeError as exc:
-        fallback = FastAPI(title="Notebook AI Cloud API", version="0.1.0")
+        fallback = FastAPI(title="Notebook AI Cloud API", version=settings.app_version)
 
         @fallback.get("/health")
-        async def health() -> dict[str, str]:
-            return {"status": "misconfigured"}
+        async def health() -> dict[str, str | bool]:
+            return {
+                "status": "misconfigured",
+                "service": "cloud-api",
+                "version": settings.app_version,
+                "build_version": settings.resolved_build_version,
+                "configured": False,
+            }
 
         @fallback.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
         async def unavailable(_request: Request, path: str) -> JSONResponse:

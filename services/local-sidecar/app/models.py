@@ -16,6 +16,7 @@ SourceHint = Literal["me", "other_audio", "unknown"]
 WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
 SyncState = Literal["idle", "syncing", "needs_setup", "error"]
 SyncPhase = Literal["idle", "preparing", "pulling", "merging", "pushing", "finalizing"]
+MarkdownEditorMode = Literal["rich_text", "preview"]
 TranscriptionErrorCode = Literal[
     "invalid_audio_format",
     "auth_or_quota",
@@ -78,7 +79,7 @@ NoteSessionData = Annotated[
 class NoteDocument(BaseModel):
     frontmatter: NoteFrontmatter
     kind: NoteKind = "note"
-    content_format: ContentFormat = "plain_text"
+    content_format: ContentFormat = "markdown"
     content: str = ""
     session: NoteSessionData | None = None
 
@@ -94,7 +95,7 @@ class NoteCreateRequest(BaseModel):
     context_preset: NoteContextPreset | None = None
     context_text: str | None = None
     kind: NoteKind = "note"
-    content_format: ContentFormat = "plain_text"
+    content_format: ContentFormat = "markdown"
     session: NoteSessionData | None = None
 
     @model_validator(mode="after")
@@ -115,7 +116,7 @@ class NoteUpdateRequest(BaseModel):
     context_preset: NoteContextPreset | None = None
     context_text: str | None = None
     kind: NoteKind = "note"
-    content_format: ContentFormat = "plain_text"
+    content_format: ContentFormat = "markdown"
     session: NoteSessionData | None = None
 
     @model_validator(mode="after")
@@ -194,17 +195,34 @@ class ProviderConnection(BaseModel):
     provider: ProviderId
     connected: bool
     via: Literal["oauth", "api_key", "none"]
+    scope: Literal["desktop_local", "account_vault", "none"] = "none"
     last_updated_at: datetime | None = None
 
 
-class ProviderStatusUpdateRequest(BaseModel):
+class ProviderModel(BaseModel):
+    id: str
+    label: str
     provider: ProviderId
-    via: Literal["oauth", "api_key"]
-    connected: bool = True
+    owned_by: str | None = None
+    context_length: int | None = None
+    supports_audio_input: bool | None = None
+
+
+class ProviderByokRequest(BaseModel):
+    provider: ProviderId
+    api_key: str = Field(min_length=4)
+
+
+class ProviderDeleteResponse(BaseModel):
+    provider: ProviderId
+    connected: bool = False
 
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+    service: str = "local-sidecar"
+    version: str
+    build_version: str
 
 
 class WorkspaceDescriptor(BaseModel):
@@ -237,6 +255,32 @@ class StoragePreference(BaseModel):
 class StoragePreferenceUpdateRequest(BaseModel):
     mode: Literal["local", "local_and_drive"] = "local"
     local_root: str | None = None
+
+
+class TranscriptionPreferences(BaseModel):
+    main_language: str = "auto"
+    spoken_languages: list[str] = Field(default_factory=list)
+    custom_vocabulary: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
+class TranscriptionPreferencesUpdateRequest(BaseModel):
+    main_language: str = "auto"
+    spoken_languages: list[str] = Field(default_factory=list)
+    custom_vocabulary: list[str] = Field(default_factory=list)
+
+
+class MarkdownSettings(BaseModel):
+    enable_import: bool = True
+    enable_export: bool = True
+    editor_mode: MarkdownEditorMode = "rich_text"
+    updated_at: datetime | None = None
+
+
+class MarkdownSettingsUpdateRequest(BaseModel):
+    enable_import: bool = True
+    enable_export: bool = True
+    editor_mode: MarkdownEditorMode = "rich_text"
 
 
 class FolderNode(BaseModel):

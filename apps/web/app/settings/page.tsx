@@ -127,6 +127,10 @@ export default function SettingsPage() {
               </div>
               <span className="section-header" style={{ margin: 0 }}>AI Providers</span>
             </div>
+            <p className="muted" style={{ margin: '0 0 12px', fontSize: '0.88rem' }}>
+              Web API keys are stored server-side in your encrypted account vault. They are not
+              persisted in browser storage and are only used through hosted API routes.
+            </p>
             <div className="form-stack">
               <label>
                 OpenAI API key

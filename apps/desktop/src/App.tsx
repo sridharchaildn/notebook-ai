@@ -14,9 +14,10 @@ import type {
   AITransformType,
   ContentFormat,
   DriveConnectionStatus,
+  FolderNode,
   InterviewSessionData,
   InterviewTurn,
-  LegalDocument,
+  MarkdownSettings,
   ModelUseCase,
   NoteAIContext,
   NoteKind,
@@ -28,16 +29,17 @@ import type {
   SupabaseSessionPayload,
   StoragePreference,
   SyncStatus,
+  TranscriptionPreferences,
   TranscriptSegment,
   TranscriptSessionData,
 } from '@notebook-ai/contracts';
 import { ChevronRight, Pencil, PanelLeftClose, PanelRightClose, Sparkles, Trash2, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type UIEvent } from 'react';
 import { AIActionPanel } from './components/AIActionPanel';
-import { LegalAcceptanceGate } from './components/LegalAcceptanceGate';
 import { MarkdownPreview } from './components/MarkdownPreview';
 import { NoteContextEditor } from './components/NoteContextEditor';
 import { NoteList } from './components/NoteList';
+import { RichMarkdownEditor } from './components/RichMarkdownEditor';
 import { SettingsModal } from './components/SettingsModal';
 import { SplashScreen } from './components/SplashScreen';
 import { SyncStatusBanner } from './components/SyncStatusBanner';
@@ -49,25 +51,28 @@ import {
   type CaptureSessionMode,
 } from './components/TranscriptionPanel';
 import {
-  acceptLegalDocuments,
   authInvalidEventName,
+  createFolder,
   createNote,
+  deleteFolder,
   deleteNote,
   getRendererSessionFallback,
   disconnectProvider,
   type DesktopRendererSession,
+  fetchFolders,
+  fetchMarkdownSettings,
   fetchProviderModels,
   fetchInterviewTurns,
-  fetchLegalAcceptances,
-  fetchLegalDocuments,
   fetchLocalRoot,
   fetchNotes,
   fetchGoogleDriveStatus,
   fetchProviderStatus,
   fetchStoragePreference,
   fetchSyncStatus,
+  fetchTranscriptionPreferences,
   logoutCloudSession,
-  openOpenAIOAuth,
+  moveNote,
+  renameFolder,
   runSyncNow,
   setRendererSessionFallback,
   setLocalRoot,
@@ -77,8 +82,10 @@ import {
   streamInterviewCoach,
   streamTransform,
   transcribeAudioChunk,
+  updateMarkdownSettings,
   updateStoragePreference,
   updateNote,
+  updateTranscriptionPreferences,
   type TranscriptionEngine,
 } from './lib/api';
 import { describeSyncStatus } from './lib/syncStatus';
@@ -112,12 +119,29 @@ const INTERVIEW_FILLER_UTTERANCES = new Set([
   'thanks',
   'thank you',
 ]);
-const MAIN_AUTH_SESSION_EVENT = 'notebook:main-auth-session';
 const COPILOT_PROVIDER_STORAGE_KEY = 'notebook_copilot_provider';
 const COPILOT_MODEL_STORAGE_KEY = 'notebook_copilot_model';
 const TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY = 'notebook_transcription_llm_provider';
 const TRANSCRIPTION_LLM_MODEL_STORAGE_KEY = 'notebook_transcription_llm_model';
 const TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY = 'notebook_transcription_whisper_model';
+const ROOT_FOLDER_LABEL = 'Notes';
+const SIDEBAR_WIDTH_STORAGE_KEY = 'notebook_sidebar_width';
+const AI_PANEL_WIDTH_STORAGE_KEY = 'notebook_ai_panel_width';
+const NOTE_DETAILS_EXPANDED_STORAGE_KEY = 'notebook_note_details_expanded';
+const DEFAULT_SIDEBAR_WIDTH = 280;
+const DEFAULT_AI_PANEL_WIDTH = 340;
+const MIN_SIDEBAR_WIDTH = 236;
+const MAX_SIDEBAR_WIDTH = 420;
+const MIN_AI_PANEL_WIDTH = 280;
+const MAX_AI_PANEL_WIDTH = 480;
+const MIN_EDITOR_WIDTH = 560;
+const MOBILE_STACK_BREAKPOINT = 860;
+const CONTEXT_PRESET_LABELS: Record<NoteContextPreset, string> = {
+  meeting: 'Meeting',
+  podcast: 'Podcast',
+  youtube: 'YouTube',
+  custom: 'Custom',
+};
 
 interface PendingDeleteState {
   note: NoteDocument;
@@ -140,6 +164,23 @@ function readStoredString(key: string): string {
   return localStorage.getItem(key)?.trim() ?? '';
 }
 
+function readStoredNumber(key: string, fallback: number): number {
+  const raw = localStorage.getItem(key);
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readStoredBoolean(key: string, fallback: boolean): boolean {
+  const raw = localStorage.getItem(key);
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return fallback;
+}
+
+function clampValue(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 function useDebouncedEffect(effect: () => void, deps: unknown[], delay: number) {
   const cleanupRef = useRef<void | (() => void)>();
 
@@ -156,13 +197,21 @@ function useDebouncedEffect(effect: () => void, deps: unknown[], delay: number) 
   }, [...deps, delay]);
 }
 
+type SettingsFeedback = {
+  tone: 'success' | 'error';
+  message: string;
+};
+
 export default function App() {
   const [notes, setNotes] = useState<NoteDocument[]>([]);
+  const [folders, setFolders] = useState<FolderNode[]>([]);
+  const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState(DEFAULT_BODY);
   const [noteKind, setNoteKind] = useState<NoteKind>('note');
-  const [contentFormat, setContentFormat] = useState<ContentFormat>('plain_text');
+  const [contentFormat, setContentFormat] = useState<ContentFormat>('markdown');
   const [showMarkdownSource, setShowMarkdownSource] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
   const [tagDraft, setTagDraft] = useState('');
@@ -202,9 +251,22 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [magicLinkEmail, setMagicLinkEmail] = useState('');
+  const [buildVersion, setBuildVersion] = useState('0.1.0');
   const [storagePreference, setStoragePreference] = useState<StoragePreference>({
     mode: 'local',
     local_root: null,
+  });
+  const [transcriptionPreferences, setTranscriptionPreferences] = useState<TranscriptionPreferences>({
+    main_language: 'auto',
+    spoken_languages: [],
+    custom_vocabulary: [],
+    updated_at: null,
+  });
+  const [markdownSettings, setMarkdownSettings] = useState<MarkdownSettings>({
+    enable_import: true,
+    enable_export: true,
+    editor_mode: 'rich_text',
+    updated_at: null,
   });
   const [localRootPath, setLocalRootPath] = useState('');
   const [storageBusy, setStorageBusy] = useState(false);
@@ -214,12 +276,22 @@ export default function App() {
   const [driveStatusBusy, setDriveStatusBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [aiPanelOpen, setAiPanelOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    readStoredNumber(SIDEBAR_WIDTH_STORAGE_KEY, DEFAULT_SIDEBAR_WIDTH),
+  );
+  const [aiPanelWidth, setAiPanelWidth] = useState(() =>
+    readStoredNumber(AI_PANEL_WIDTH_STORAGE_KEY, DEFAULT_AI_PANEL_WIDTH),
+  );
+  const [detailsExpanded, setDetailsExpanded] = useState(() =>
+    readStoredBoolean(NOTE_DETAILS_EXPANDED_STORAGE_KEY, false),
+  );
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [activeTransformAction, setActiveTransformAction] = useState<AITransformType | null>(null);
   const [byokSubmitting, setByokSubmitting] = useState(false);
   const [providerDisconnecting, setProviderDisconnecting] = useState<ProviderId | null>(null);
   const [aiOutput, setAiOutput] = useState('');
+  const [settingsFeedback, setSettingsFeedback] = useState<SettingsFeedback | null>(null);
   const [message, setMessage] = useState('Ready');
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteState | null>(null);
   const [recording, setRecording] = useState(false);
@@ -238,13 +310,6 @@ export default function App() {
   const [copilotChatDraft, setCopilotChatDraft] = useState('');
   const [copilotChatHistory, setCopilotChatHistory] = useState<CopilotChatMessage[]>([]);
   const [copilotChatBusy, setCopilotChatBusy] = useState(false);
-  const [legalStage, setLegalStage] = useState<'checking' | 'needs_acceptance' | 'ready' | 'error'>('checking');
-  const [legalDocuments, setLegalDocuments] = useState<LegalDocument[]>([]);
-  const [legalBusy, setLegalBusy] = useState(false);
-  const [legalError, setLegalError] = useState('');
-  const [privacyAccepted, setPrivacyAccepted] = useState(false);
-  const [termsAccepted, setTermsAccepted] = useState(false);
-  const [legalReloadToken, setLegalReloadToken] = useState(0);
   const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>(() => {
     return (localStorage.getItem('notebook_transcription_engine') as TranscriptionEngine) || 'whisper';
   });
@@ -253,6 +318,25 @@ export default function App() {
     setTranscriptionEngine(engine);
     localStorage.setItem('notebook_transcription_engine', engine);
   }
+
+  function clearSettingsFeedback() {
+    setSettingsFeedback(null);
+  }
+
+  function setSettingsSuccess(nextMessage: string) {
+    setSettingsFeedback({ tone: 'success', message: nextMessage });
+  }
+
+  function setSettingsError(nextMessage: string) {
+    setSettingsFeedback({ tone: 'error', message: nextMessage });
+  }
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      setSettingsFeedback(null);
+    }
+  }, [settingsOpen]);
+
   const [isMacPlatform] = useState(() => /mac/i.test(navigator.platform));
   const captureStreamRef = useRef<MediaStream | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
@@ -287,11 +371,80 @@ export default function App() {
   const shouldAutoScrollInterviewRef = useRef(true);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const deleteUndoTimerRef = useRef<number | null>(null);
+  const autoEnhanceNoteIdRef = useRef<string | null>(null);
   const authCallbackInFlightRef = useRef<string | null>(null);
   const lastHandledAuthCallbackRef = useRef<string | null>(null);
   const driveConnectPollingRef = useRef(false);
   const transformAbortRef = useRef<AbortController | null>(null);
   const copilotChatAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    localStorage.setItem(AI_PANEL_WIDTH_STORAGE_KEY, String(aiPanelWidth));
+  }, [aiPanelWidth]);
+
+  useEffect(() => {
+    localStorage.setItem(NOTE_DETAILS_EXPANDED_STORAGE_KEY, String(detailsExpanded));
+  }, [detailsExpanded]);
+
+  useEffect(() => {
+    return () => {
+      document.body.classList.remove('is-resizing-panels');
+    };
+  }, []);
+
+  function getSidebarWidthBounds() {
+    const otherPanelWidth = aiPanelOpen ? aiPanelWidth : 48;
+    const maxAllowed = Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - otherPanelWidth - MIN_EDITOR_WIDTH);
+    return {
+      min: MIN_SIDEBAR_WIDTH,
+      max: Math.max(MIN_SIDEBAR_WIDTH, maxAllowed),
+    };
+  }
+
+  function getAiPanelWidthBounds() {
+    const otherPanelWidth = sidebarOpen ? sidebarWidth : 48;
+    const maxAllowed = Math.min(MAX_AI_PANEL_WIDTH, window.innerWidth - otherPanelWidth - MIN_EDITOR_WIDTH);
+    return {
+      min: MIN_AI_PANEL_WIDTH,
+      max: Math.max(MIN_AI_PANEL_WIDTH, maxAllowed),
+    };
+  }
+
+  function startPanelResize(panel: 'sidebar' | 'ai', event: ReactPointerEvent<HTMLDivElement>) {
+    if (window.innerWidth <= MOBILE_STACK_BREAKPOINT) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startX = event.clientX;
+    const startWidth = panel === 'sidebar' ? sidebarWidth : aiPanelWidth;
+    document.body.classList.add('is-resizing-panels');
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      if (panel === 'sidebar') {
+        const bounds = getSidebarWidthBounds();
+        setSidebarWidth(clampValue(startWidth + moveEvent.clientX - startX, bounds.min, bounds.max));
+        return;
+      }
+
+      const bounds = getAiPanelWidthBounds();
+      setAiPanelWidth(clampValue(startWidth + startX - moveEvent.clientX, bounds.min, bounds.max));
+    };
+
+    const cleanup = () => {
+      document.body.classList.remove('is-resizing-panels');
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
+  }
 
   function applyRendererSession(session: DesktopRendererSession | null) {
     setRendererSessionFallback(session);
@@ -299,8 +452,7 @@ export default function App() {
     setManualSignInUrl(null);
     setSessionUserId(session?.userId ?? null);
     setShowSplash(!session?.userId);
-    setLegalReloadToken((value) => value + 1);
-    setMessage(session?.userId ? 'Signed in. Checking legal requirements...' : 'Ready');
+    setMessage(session?.userId ? 'Signed in. Loading workspace...' : 'Ready');
   }
 
   const selectedNote = useMemo(
@@ -340,12 +492,19 @@ export default function App() {
     ? providerModelsError[transcriptionModelCacheKey] ?? ''
     : '';
 
+  useEffect(() => {
+    setSelectedNoteIds((prev) =>
+      prev.filter((noteId) => notes.some((note) => note.frontmatter.id === noteId)),
+    );
+  }, [notes]);
+
   function mergeProviderStatuses(statuses: ProviderConnection[]) {
     setProviders(
       statuses.map((entry) => ({
         provider: entry.provider,
         connected: entry.connected,
         via: entry.via,
+        scope: entry.scope,
         last_updated_at: entry.last_updated_at,
       })),
     );
@@ -362,10 +521,8 @@ export default function App() {
       const rawMessage = error instanceof Error ? error.message : 'Unable to load models.';
       const friendlyMessage =
         rawMessage === 'Credential not found'
-          ? `Save a ${provider === 'openai' ? 'OpenAI' : 'OpenRouter'} key in Settings to browse models.`
-          : rawMessage.includes('usable access token')
-            ? `This ${provider === 'openai' ? 'OpenAI' : 'OpenRouter'} OAuth connection cannot list models yet. Use BYOK for model selection.`
-            : rawMessage;
+          ? `Save a local ${provider === 'openai' ? 'OpenAI' : 'OpenRouter'} key in Settings to browse models on this device.`
+          : rawMessage;
       setProviderModelsError((prev) => ({
         ...prev,
         [cacheKey]: friendlyMessage,
@@ -491,15 +648,40 @@ export default function App() {
   }, [activeSessionMode]);
 
   useEffect(() => {
+    const pendingNoteId = autoEnhanceNoteIdRef.current;
+    if (!pendingNoteId) return;
+    if (recording || transcriptionBusy) return;
+    if (!selectedNote || selectedNote.frontmatter.id !== pendingNoteId) return;
+    if (!['transcript', 'interview_assist'].includes(selectedNote.kind)) return;
+    if (!body.trim() && !interviewTranscriptRef.current.trim()) return;
+    if (!connectedProviders.includes(copilotProvider)) {
+      autoEnhanceNoteIdRef.current = null;
+      return;
+    }
+
+    autoEnhanceNoteIdRef.current = null;
+    void runTransform('summarize');
+  }, [
+    body,
+    connectedProviders,
+    copilotProvider,
+    recording,
+    selectedNote,
+    transcriptionBusy,
+  ]);
+
+  useEffect(() => {
     let disposed = false;
     void (async () => {
       try {
-        const [bridgeSession, pendingAuthFlow] = await Promise.all([
+        const [appInfo, bridgeSession, pendingAuthFlow] = await Promise.all([
+          window.notebookDesktop?.getAppInfo?.(),
           window.notebookDesktop?.getAuthSession?.(),
           hasPendingDesktopAuthFlow(),
         ]);
         const session = bridgeSession ?? getRendererSessionFallback();
         if (disposed) return;
+        setBuildVersion(appInfo?.buildVersion ?? appInfo?.version ?? '0.1.0');
         setSessionUserId(session?.userId ?? null);
         setAuthPending(Boolean(!session?.userId && pendingAuthFlow));
         setShowSplash(!session?.userId);
@@ -527,9 +709,6 @@ export default function App() {
       setAuthPending(false);
       setManualSignInUrl(null);
       setSettingsOpen(false);
-      setLegalStage('checking');
-      setLegalDocuments([]);
-      setLegalError('');
       setShowSplash(true);
       setMessage(detail);
     };
@@ -577,86 +756,62 @@ export default function App() {
     const unsubscribeSession = window.notebookDesktop?.onAuthSessionUpdated?.((session) => {
       applyRendererSession(session);
     });
-    const onMainSession = (event: Event) => {
-      if (!(event instanceof CustomEvent)) return;
-      const detail =
-        event.detail && typeof event.detail === 'object'
-          ? (event.detail as DesktopRendererSession | null)
-          : null;
-      applyRendererSession(detail);
-    };
-    window.addEventListener(MAIN_AUTH_SESSION_EVENT, onMainSession);
     return () => {
       disposed = true;
       window.clearInterval(pollTimer);
       unsubscribeAuthCallback?.();
       unsubscribeSession?.();
-      window.removeEventListener(MAIN_AUTH_SESSION_EVENT, onMainSession);
     };
   }, [sessionUserId]);
 
   useEffect(() => {
-    if (!authReady) return;
-    if (!sessionUserId) {
-      setLegalStage('checking');
-      setLegalDocuments([]);
-      setLegalError('');
-      return;
-    }
-
-    let disposed = false;
+    if (!authReady || !sessionUserId) return;
     void (async () => {
       try {
-        setLegalStage('checking');
-        setLegalError('');
-        const [documents, acceptances] = await Promise.all([
-          fetchLegalDocuments(),
-          fetchLegalAcceptances(),
-        ]);
-        if (disposed) return;
-
-        const acceptedPairs = new Set(acceptances.map((entry) => `${entry.type}:${entry.version}`));
-        const missing = documents.filter((doc) => !acceptedPairs.has(`${doc.type}:${doc.version}`));
-
-        setLegalDocuments(documents);
-        setPrivacyAccepted(false);
-        setTermsAccepted(false);
-        if (missing.length > 0) {
-          setLegalStage('needs_acceptance');
-          setMessage('Accept the latest Privacy Policy and User Agreement to continue.');
-          return;
-        }
-
-        setLegalStage('ready');
-        setMessage('Ready');
-      } catch (error) {
-        if (disposed) return;
-        setLegalError(error instanceof Error ? error.message : 'Unable to load legal requirements.');
-        setLegalStage('error');
-      }
-    })();
-
-    return () => {
-      disposed = true;
-    };
-  }, [authReady, sessionUserId, legalReloadToken]);
-
-  useEffect(() => {
-    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
-    void (async () => {
-      try {
-        const [loadedNotes, providerStatuses, pref, localRoot, sync, drive] = await Promise.all([
+        const [
+          loadedNotes,
+          loadedFolders,
+          providerStatuses,
+          pref,
+          localRoot,
+          sync,
+          drive,
+          loadedTranscriptionPreferences,
+          loadedMarkdownSettings,
+        ] = await Promise.all([
           fetchNotes(),
+          fetchFolders().catch(() => []),
           fetchProviderStatus(),
           fetchStoragePreference().catch(() => ({ mode: 'local', local_root: null } as StoragePreference)),
           fetchLocalRoot().catch(() => ''),
           fetchSyncStatus().catch(() => null),
           fetchGoogleDriveStatus().catch(() => DEFAULT_DRIVE_STATUS),
+          fetchTranscriptionPreferences().catch(
+            () =>
+              ({
+                main_language: 'auto',
+                spoken_languages: [],
+                custom_vocabulary: [],
+                updated_at: null,
+              }) as TranscriptionPreferences,
+          ),
+          fetchMarkdownSettings().catch(
+            () =>
+              ({
+                enable_import: true,
+                enable_export: true,
+                editor_mode: 'rich_text',
+                updated_at: null,
+              }) as MarkdownSettings,
+          ),
         ]);
 
         setNotes(loadedNotes);
+        setFolders(loadedFolders);
         mergeProviderStatuses(providerStatuses);
         setStoragePreference(pref);
+        setTranscriptionPreferences(loadedTranscriptionPreferences);
+        setMarkdownSettings(loadedMarkdownSettings);
         setLocalRootPath(pref.local_root || localRoot);
         setSyncStatus(sync);
         setDriveStatus(drive);
@@ -664,6 +819,7 @@ export default function App() {
         const first = loadedNotes[0];
         if (first) {
           setSelectedId(first.frontmatter.id);
+          setSelectedFolderId(first.frontmatter.folder_id ?? null);
           applyEditorStateFromNote(first);
         } else {
           const created = await createNote({
@@ -671,19 +827,20 @@ export default function App() {
             content: DEFAULT_BODY,
             tags: ['welcome'],
             kind: 'note',
-            content_format: 'plain_text',
+            content_format: 'markdown',
             context_preset: 'custom',
             context_text: '',
           });
           setNotes([created]);
           setSelectedId(created.frontmatter.id);
+          setSelectedFolderId(created.frontmatter.folder_id ?? null);
           applyEditorStateFromNote(created);
         }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Failed to initialize');
       }
     })();
-  }, [authReady, sessionUserId, legalStage]);
+  }, [authReady, sessionUserId]);
 
   useEffect(() => {
     if (connectedProviders.length === 0) return;
@@ -701,13 +858,13 @@ export default function App() {
   }, [connectedProviders, llmTranscriptionProvider, transcriptionEngine]);
 
   useEffect(() => {
-    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
+    if (!authReady || !sessionUserId) return;
     if (!connectedProviders.includes(copilotProvider)) return;
     void loadProviderModels(copilotProvider, 'copilot');
-  }, [authReady, sessionUserId, legalStage, connectedProviders, copilotProvider]);
+  }, [authReady, sessionUserId, connectedProviders, copilotProvider]);
 
   useEffect(() => {
-    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
+    if (!authReady || !sessionUserId) return;
     if (transcriptionEngine === 'whisper') {
       if (!connectedProviders.includes('openai')) return;
     } else if (!connectedProviders.includes(activeTranscriptionProvider)) {
@@ -717,7 +874,6 @@ export default function App() {
   }, [
     authReady,
     sessionUserId,
-    legalStage,
     connectedProviders,
     activeTranscriptionProvider,
     transcriptionEngine,
@@ -756,7 +912,7 @@ export default function App() {
   }, [transcriptionEngine, transcriptionModelOptions, whisperTranscriptionModel]);
 
   useEffect(() => {
-    if (!authReady || !sessionUserId || legalStage !== 'ready') return;
+    if (!authReady || !sessionUserId) return;
     if (storagePreference.mode !== 'local_and_drive') return;
 
     let disposed = false;
@@ -780,7 +936,7 @@ export default function App() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [authReady, sessionUserId, legalStage, storagePreference.mode]);
+  }, [authReady, sessionUserId, storagePreference.mode]);
 
 
 
@@ -902,7 +1058,7 @@ export default function App() {
       setTitle('');
       setBody('');
       setNoteKind('note');
-      setContentFormat('plain_text');
+      setContentFormat('markdown');
       setTags([]);
       setTagDraft('');
       setContextPreset('custom');
@@ -1518,13 +1674,15 @@ export default function App() {
         content: DEFAULT_BODY,
         tags: [],
         kind: 'note',
-        content_format: 'plain_text',
+        content_format: 'markdown',
+        folder_id: selectedFolderId,
         context_preset: contextPreset,
         context_text: contextText.trim() || null,
       });
 
       setNotes((prev) => [created, ...prev]);
       setSelectedId(created.frontmatter.id);
+      setSelectedFolderId(created.frontmatter.folder_id ?? null);
       applyEditorStateFromNote(created);
       setMessage('Created a new note');
     } catch (error) {
@@ -1532,10 +1690,149 @@ export default function App() {
     }
   }
 
+  function handleSelectNote(noteId: string) {
+    const note = notes.find((entry) => entry.frontmatter.id === noteId) ?? null;
+    setSelectedId(noteId);
+    setSelectedFolderId(note?.frontmatter.folder_id ?? null);
+  }
+
+  function handleSelectFolder(folderId: string | null) {
+    setSelectedFolderId(folderId);
+    setSelectedId(null);
+    applyEditorStateFromNote(null);
+  }
+
+  function handleToggleNoteSelection(noteId: string, checked: boolean) {
+    setSelectedNoteIds((prev) => {
+      if (checked) {
+        if (prev.includes(noteId)) return prev;
+        return [...prev, noteId];
+      }
+      return prev.filter((id) => id !== noteId);
+    });
+  }
+
   async function handleSearchChange(value: string) {
     setSearch(value);
     const loaded = await fetchNotes(value);
     setNotes(loaded);
+  }
+
+  async function handleCreateFolder(name: string) {
+    if (!name.trim()) return;
+    try {
+      const created = await createFolder(name.trim());
+      setFolders((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+      setSelectedFolderId(created.id);
+      setSelectedId(null);
+      applyEditorStateFromNote(null);
+      setMessage(`Created folder "${created.name}".`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to create folder.');
+    }
+  }
+
+  async function handleRenameFolder(folderId: string, name: string) {
+    if (!name.trim()) return;
+    const current = folders.find((folder) => folder.id === folderId);
+    if (!current || name.trim() === current.name) return;
+    try {
+      const updated = await renameFolder(folderId, name.trim());
+      setFolders((prev) =>
+        prev.map((folder) => (folder.id === updated.id ? updated : folder)).sort((a, b) => a.name.localeCompare(b.name)),
+      );
+      setMessage(`Renamed folder to "${updated.name}".`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to rename folder.');
+    }
+  }
+
+  async function handleDeleteFolder(folderId: string) {
+    const current = folders.find((folder) => folder.id === folderId);
+    if (!current) return;
+    try {
+      await deleteFolder(folderId);
+      const [loadedNotes, loadedFolders] = await Promise.all([fetchNotes(search), fetchFolders()]);
+      setNotes(loadedNotes);
+      setFolders(loadedFolders);
+      if (selectedFolderId === folderId) {
+        setSelectedFolderId(null);
+      }
+      setMessage(`Deleted folder "${current.name}".`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to delete folder.');
+    }
+  }
+
+  async function handleMoveNote(noteId: string, folderId: string | null) {
+    try {
+      const updated = await moveNote(noteId, { folder_id: folderId });
+      setNotes((prev) => prev.map((note) => (note.frontmatter.id === updated.frontmatter.id ? updated : note)));
+      if (selectedId === updated.frontmatter.id) {
+        setSelectedFolderId(updated.frontmatter.folder_id ?? null);
+      }
+      setMessage(folderId ? 'Moved note.' : `Moved note to ${ROOT_FOLDER_LABEL}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to move note.');
+    }
+  }
+
+  async function handleMoveSelectedNotes(folderId: string | null) {
+    if (selectedNoteIds.length === 0) return;
+    try {
+      const movedNotes = await Promise.all(
+        selectedNoteIds.map((noteId) => moveNote(noteId, { folder_id: folderId })),
+      );
+      const movedById = new Map(movedNotes.map((note) => [note.frontmatter.id, note]));
+      setNotes((prev) =>
+        prev.map((note) => movedById.get(note.frontmatter.id) ?? note),
+      );
+      setSelectedNoteIds([]);
+      setSelectedFolderId(folderId);
+      setMessage(
+        folderId
+          ? `Moved ${movedNotes.length} notes.`
+          : `Moved ${movedNotes.length} notes to ${ROOT_FOLDER_LABEL}.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to move selected notes.');
+    }
+  }
+
+  async function handleTranscriptionPreferencesPatch(
+    patch: Partial<Omit<TranscriptionPreferences, 'updated_at'>>,
+  ) {
+    const next = {
+      main_language: patch.main_language ?? transcriptionPreferences.main_language,
+      spoken_languages: patch.spoken_languages ?? transcriptionPreferences.spoken_languages,
+      custom_vocabulary: patch.custom_vocabulary ?? transcriptionPreferences.custom_vocabulary,
+    };
+    setTranscriptionPreferences((prev) => ({ ...prev, ...next }));
+    try {
+      const saved = await updateTranscriptionPreferences(next);
+      setTranscriptionPreferences(saved);
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to update transcription settings.');
+      setMessage(error instanceof Error ? error.message : 'Unable to update transcription settings.');
+    }
+  }
+
+  async function handleMarkdownSettingsPatch(
+    patch: Partial<Omit<MarkdownSettings, 'updated_at'>>,
+  ) {
+    const next = {
+      enable_import: patch.enable_import ?? markdownSettings.enable_import,
+      enable_export: patch.enable_export ?? markdownSettings.enable_export,
+      editor_mode: patch.editor_mode ?? markdownSettings.editor_mode,
+    };
+    setMarkdownSettings((prev) => ({ ...prev, ...next }));
+    try {
+      const saved = await updateMarkdownSettings(next);
+      setMarkdownSettings(saved);
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to update markdown settings.');
+      setMessage(error instanceof Error ? error.message : 'Unable to update markdown settings.');
+    }
   }
 
   function handleRenameNote(noteId?: string) {
@@ -1583,6 +1880,7 @@ export default function App() {
     const remainingNotes = notes.filter((note) => note.frontmatter.id !== noteId);
     setPendingDelete({ note: target, index: targetIndex });
     setNotes(remainingNotes);
+    setSelectedNoteIds((prev) => prev.filter((id) => id !== noteId));
 
     if (selectedId === noteId) {
       const nextSelection = remainingNotes[targetIndex] ?? remainingNotes[targetIndex - 1] ?? null;
@@ -1749,11 +2047,13 @@ export default function App() {
 
   async function handleSaveByok() {
     if (!byokValue.trim()) {
+      setSettingsError('Enter an API key before saving.');
       setMessage('Enter an API key before saving.');
       return;
     }
 
     setByokSubmitting(true);
+    clearSettingsFeedback();
     try {
       await storeByok(byokProvider, byokValue.trim());
       setByokValue('');
@@ -1761,8 +2061,10 @@ export default function App() {
       mergeProviderStatuses(statuses);
       void loadProviderModels(byokProvider, 'copilot');
       void loadProviderModels(byokProvider, 'transcription');
-      setMessage('Provider key saved');
+      setSettingsSuccess('Provider key saved locally on this device.');
+      setMessage('Provider key saved locally on this device.');
     } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to save key');
       setMessage(error instanceof Error ? error.message : 'Unable to save key');
     } finally {
       setByokSubmitting(false);
@@ -1770,6 +2072,7 @@ export default function App() {
   }
 
   async function handleDisconnectProvider(provider: ProviderId) {
+    clearSettingsFeedback();
     setProviderDisconnecting(provider);
     try {
       await disconnectProvider(provider);
@@ -1780,8 +2083,11 @@ export default function App() {
         [`${provider}:copilot`]: '',
         [`${provider}:transcription`]: '',
       }));
-      setMessage(`Disconnected ${provider}.`);
+      const successMessage = `Removed ${provider} key from this device.`;
+      setSettingsSuccess(successMessage);
+      setMessage(successMessage);
     } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to disconnect provider');
       setMessage(error instanceof Error ? error.message : 'Unable to disconnect provider');
     } finally {
       setProviderDisconnecting(null);
@@ -1931,6 +2237,7 @@ export default function App() {
 
   async function handleStorageModeChange(mode: StoragePreference['mode']) {
     setStorageBusy(true);
+    clearSettingsFeedback();
     try {
       const updated = await updateStoragePreference(mode);
       setStoragePreference(updated);
@@ -1939,52 +2246,21 @@ export default function App() {
       if (mode === 'local_and_drive') {
         const drive = await fetchGoogleDriveStatus().catch(() => DEFAULT_DRIVE_STATUS);
         setDriveStatus(drive);
-        setMessage(
-          drive.connected
-            ? describeSyncStatus(sync, drive.folder_name || 'Notebook AI')
-            : 'Drive mirror enabled. Connect Google Drive to start mirroring.',
-        );
+        const successMessage = drive.connected
+          ? describeSyncStatus(sync, drive.folder_name || 'Notebook AI')
+          : 'Drive mirror enabled. Connect Google Drive to start mirroring.';
+        setSettingsSuccess(successMessage);
+        setMessage(successMessage);
       } else {
+        setSettingsSuccess('Local-only storage enabled.');
         setMessage('Local-only storage enabled.');
       }
     } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to update storage preference');
       setMessage(error instanceof Error ? error.message : 'Unable to update storage preference');
     } finally {
       setStorageBusy(false);
     }
-  }
-
-  async function handleAcceptLegal() {
-    if (!privacyAccepted || !termsAccepted) {
-      setLegalError('Accept both documents to continue.');
-      return;
-    }
-
-    const privacyDoc = legalDocuments.find((doc) => doc.type === 'privacy_policy');
-    const termsDoc = legalDocuments.find((doc) => doc.type === 'user_agreement');
-    if (!privacyDoc || !termsDoc) {
-      setLegalError('Legal documents are unavailable. Retry in a moment.');
-      return;
-    }
-
-    setLegalBusy(true);
-    setLegalError('');
-    try {
-      await acceptLegalDocuments([
-        { type: 'privacy_policy', version: privacyDoc.version },
-        { type: 'user_agreement', version: termsDoc.version },
-      ]);
-      setLegalStage('ready');
-      setMessage('Legal acceptance complete. Loading your workspace...');
-    } catch (error) {
-      setLegalError(error instanceof Error ? error.message : 'Unable to save legal acceptance.');
-    } finally {
-      setLegalBusy(false);
-    }
-  }
-
-  function handleRetryLegalCheck() {
-    setLegalReloadToken((value) => value + 1);
   }
 
   async function handleLogout() {
@@ -2000,9 +2276,6 @@ export default function App() {
       setSessionUserId(null);
       setAuthPending(false);
       setManualSignInUrl(null);
-      setLegalStage('checking');
-      setLegalDocuments([]);
-      setLegalError('');
       setShowSplash(true);
       setSettingsOpen(false);
       setMessage('Signed out successfully.');
@@ -2121,6 +2394,7 @@ export default function App() {
 
   async function handleChooseLocalFolder() {
     try {
+      clearSettingsFeedback();
       const selected = await window.notebookDesktop?.chooseDirectory?.();
       if (!selected) return;
       const updatedPath = await setLocalRoot(selected);
@@ -2130,14 +2404,19 @@ export default function App() {
         const sync = await fetchSyncStatus().catch(() => null);
         if (sync) {
           setSyncStatus(sync);
-          setMessage(`Local folder updated. ${describeSyncStatus(sync, driveStatus.folder_name || 'Notebook AI')}`);
+          const successMessage = `Local folder updated. ${describeSyncStatus(sync, driveStatus.folder_name || 'Notebook AI')}`;
+          setSettingsSuccess(successMessage);
+          setMessage(successMessage);
         } else {
+          setSettingsSuccess('Local folder updated. Reconciling with Google Drive...');
           setMessage('Local folder updated. Reconciling with Google Drive...');
         }
       } else {
+        setSettingsSuccess('Local storage folder updated.');
         setMessage('Local storage folder updated.');
       }
     } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Unable to update local folder');
       setMessage(error instanceof Error ? error.message : 'Unable to update local folder');
     }
   }
@@ -2145,6 +2424,7 @@ export default function App() {
   async function handleRunSyncNow() {
     setSyncActionBusy(true);
     setStorageBusy(true);
+    clearSettingsFeedback();
     try {
       setMessage('Starting Drive sync...');
       setSyncStatus((prev) => ({
@@ -2161,7 +2441,9 @@ export default function App() {
       }));
       const status = await runSyncNow();
       setSyncStatus(status);
-      setMessage(describeSyncStatus(status, driveStatus.folder_name || 'Notebook AI'));
+      const successMessage = describeSyncStatus(status, driveStatus.folder_name || 'Notebook AI');
+      setSettingsSuccess(successMessage);
+      setMessage(successMessage);
     } catch (error) {
       setSyncStatus((prev) =>
         prev
@@ -2174,6 +2456,7 @@ export default function App() {
             }
           : prev,
       );
+      setSettingsError(error instanceof Error ? error.message : 'Unable to run sync');
       setMessage(error instanceof Error ? error.message : 'Unable to run sync');
     } finally {
       setSyncActionBusy(false);
@@ -2328,6 +2611,7 @@ export default function App() {
     setNotes((prev) => [created, ...prev]);
     setSelectedId(created.frontmatter.id);
     applyEditorStateFromNote(created);
+    autoEnhanceNoteIdRef.current = created.frontmatter.id;
 
     setRecording(true);
     setTranscriptionStatus(listeningStatus);
@@ -2670,41 +2954,28 @@ export default function App() {
         statusMessage={authReady ? message : 'Loading secure session...'}
         manualSignInUrl={manualSignInUrl}
         magicLinkEmail={magicLinkEmail}
-      />
-    );
-  }
-
-  if (sessionUserId && (legalStage === 'needs_acceptance' || legalStage === 'error')) {
-    return (
-      <LegalAcceptanceGate
-        stage={legalStage}
-        documents={legalDocuments}
-        busy={legalBusy}
-        errorMessage={legalError}
-        privacyAccepted={privacyAccepted}
-        termsAccepted={termsAccepted}
-        onPrivacyAcceptedChange={setPrivacyAccepted}
-        onTermsAcceptedChange={setTermsAccepted}
-        onAccept={() => {
-          void handleAcceptLegal();
-        }}
-        onRetry={handleRetryLegalCheck}
+        buildVersion={buildVersion}
       />
     );
   }
 
   const gridCols = [
-    sidebarOpen ? '280px' : '48px',
+    sidebarOpen ? `${sidebarWidth}px` : '48px',
     '1fr',
-    aiPanelOpen ? '340px' : '48px',
+    aiPanelOpen ? `${aiPanelWidth}px` : '48px',
   ].join(' ');
   const coachTargetTurn = selectCoachTargetTurn(interviewTurns, interviewTranscript);
-  const showMarkdownPreview = isMarkdownNote(selectedNote) && !showMarkdownSource;
+  const showMarkdownPreview =
+    isMarkdownNote(selectedNote) &&
+    (markdownSettings.editor_mode === 'preview' ? !showMarkdownSource : showMarkdownSource);
   const transcriptViewText = getTranscriptSession(selectedNote)?.transcript ?? body;
   const transcriptViewSegments = selectedNote?.frontmatter.id === selectedId
     ? transcriptSegments
     : (getTranscriptSession(selectedNote)?.segments ?? []);
   const showCopilotChat = showTranscriptNoteView || showInterviewNoteView;
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
+  const detailsTagLabel = tags.length === 1 ? '1 tag' : `${tags.length} tags`;
+  const detailsContextLabel = CONTEXT_PRESET_LABELS[contextPreset];
 
 
   return (
@@ -2713,27 +2984,56 @@ export default function App() {
 
       {/* Sidebar */}
       {sidebarOpen ? (
-        <NoteList
-          notes={notes}
-          selectedId={selectedId}
-          search={search}
-          onSearchChange={(value) => {
-            void handleSearchChange(value);
-          }}
-          onSelect={setSelectedId}
-          onCreate={() => {
-            void handleCreateNote();
-          }}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenSplash={() => setShowSplash(true)}
-          onCollapse={() => setSidebarOpen(false)}
-          onLogout={() => {
-            void handleLogout();
-          }}
-          onRenameNote={handleRenameNote}
-          onDeleteNote={handleDeleteNote}
-          logoutBusy={logoutBusy}
-        />
+        <div className="panel-shell panel-shell--sidebar">
+          <NoteList
+            notes={notes}
+            folders={folders}
+            selectedId={selectedId}
+            selectedFolderId={selectedFolderId}
+            selectedNoteIds={selectedNoteIds}
+            search={search}
+            onSearchChange={(value) => {
+              void handleSearchChange(value);
+            }}
+            onSelect={handleSelectNote}
+            onSelectFolder={handleSelectFolder}
+            onToggleNoteSelection={handleToggleNoteSelection}
+            onMoveSelectedNotes={(folderId) => {
+              void handleMoveSelectedNotes(folderId);
+            }}
+            onCreate={() => {
+              void handleCreateNote();
+            }}
+            onCreateFolder={(name) => {
+              void handleCreateFolder(name);
+            }}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSplash={() => setShowSplash(true)}
+            onCollapse={() => setSidebarOpen(false)}
+            onLogout={() => {
+              void handleLogout();
+            }}
+            onRenameNote={handleRenameNote}
+            onDeleteNote={handleDeleteNote}
+            onRenameFolder={(folderId, name) => {
+              void handleRenameFolder(folderId, name);
+            }}
+            onDeleteFolder={(folderId) => {
+              void handleDeleteFolder(folderId);
+            }}
+            onMoveNote={(noteId, folderId) => {
+              void handleMoveNote(noteId, folderId);
+            }}
+            onClearSelectedNotes={() => setSelectedNoteIds([])}
+            logoutBusy={logoutBusy}
+          />
+          <div
+            className="panel-resizer panel-resizer--right"
+            role="separator"
+            aria-label="Resize notes panel"
+            onPointerDown={(event) => startPanelResize('sidebar', event)}
+          />
+        </div>
       ) : (
         <div className="collapsed-sidebar">
           <button type="button" className="collapse-toggle" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar">
@@ -2754,24 +3054,6 @@ export default function App() {
                 className="title-input"
                 placeholder="Untitled note"
               />
-              <div className="editor-metadata">
-                <TagEditor
-                  tags={tags}
-                  draftValue={tagDraft}
-                  onDraftChange={setTagDraft}
-                  onCommitDraft={commitTagDraft}
-                  onRemoveTag={(tag) => setTags((prev) => removeTag(prev, tag))}
-                  onRemoveLastTag={() =>
-                    setTags((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev))
-                  }
-                />
-                <NoteContextEditor
-                  preset={contextPreset}
-                  text={contextText}
-                  onPresetChange={setContextPreset}
-                  onTextChange={setContextText}
-                />
-              </div>
             </div>
 
             <div className="header-right">
@@ -2795,7 +3077,7 @@ export default function App() {
                     className="ghost-btn"
                     onClick={() => setShowMarkdownSource((prev) => !prev)}
                   >
-                    {showMarkdownSource ? 'Preview markdown' : 'Show source'}
+                    {showMarkdownPreview ? 'Edit note' : 'Preview note'}
                   </button>
                 ) : null}
               </div>
@@ -2807,13 +3089,56 @@ export default function App() {
             <div className="title-wrap">
               <h2 className="editor-empty-title">No note selected</h2>
               <p className="editor-empty-copy">
-                Create a note or start a recording to open a new transcript.
+                {selectedFolder
+                  ? `Create a note in ${selectedFolder.name} or start a recording to capture a transcript there.`
+                  : 'Create a note or start a recording to open a new transcript.'}
               </p>
             </div>
             <div className="header-right">
               <span className="status-pill">{message}</span>
             </div>
           </header>
+        ) : null}
+
+        {selectedNote ? (
+          <section className={`editor-details${detailsExpanded ? ' is-expanded' : ''}`}>
+            <button
+              type="button"
+              className="editor-details__toggle"
+              aria-expanded={detailsExpanded}
+              onClick={() => setDetailsExpanded((prev) => !prev)}
+            >
+              <div className="editor-details__copy">
+                <span className="editor-details__eyebrow">Details</span>
+                <strong>Tags and recording context</strong>
+              </div>
+              <div className="editor-details__summary">
+                <span className="editor-details__summary-pill">{detailsTagLabel}</span>
+                <span className="editor-details__summary-pill">{detailsContextLabel}</span>
+                <ChevronRight className="editor-details__chevron" size={16} />
+              </div>
+            </button>
+            {detailsExpanded ? (
+              <div className="editor-details__body">
+                <TagEditor
+                  tags={tags}
+                  draftValue={tagDraft}
+                  onDraftChange={setTagDraft}
+                  onCommitDraft={commitTagDraft}
+                  onRemoveTag={(tag) => setTags((prev) => removeTag(prev, tag))}
+                  onRemoveLastTag={() =>
+                    setTags((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev))
+                  }
+                />
+                <NoteContextEditor
+                  preset={contextPreset}
+                  text={contextText}
+                  onPresetChange={setContextPreset}
+                  onTextChange={setContextText}
+                />
+              </div>
+            ) : null}
+          </section>
         ) : null}
 
         {storagePreference.mode === 'local_and_drive' ? (
@@ -2843,8 +3168,12 @@ export default function App() {
 
         {!selectedNote ? (
           <section className="note-empty-panel">
-            <h3>No note selected</h3>
-            <p>Create a new note, open an existing one, or start recording to capture a transcript.</p>
+            <h3>{selectedFolder ? `${selectedFolder.name}` : 'No note selected'}</h3>
+            <p>
+              {selectedFolder
+                ? `This folder is selected. Create a new note here or move selected notes into it from the sidebar.`
+                : 'Create a new note, open an existing one, or start recording to capture a transcript.'}
+            </p>
             <div className="note-empty-panel__context">
               <h4>Next recording context</h4>
               <p>Set this before you start a transcript so Copilot and summaries know what the audio is about.</p>
@@ -3000,54 +3329,58 @@ export default function App() {
             onCopilotProviderChange={setCopilotProvider}
             onCopilotModelChange={setCopilotModel}
             onTabChange={setTranscriptViewTab}
+            onSummaryChange={setNoteSummary}
           />
         ) : showMarkdownPreview ? (
           <section className="note-preview-panel">
             <header className="note-preview-panel__header">
               <h3>Markdown Preview</h3>
-              <span className="status-pill">Imported note</span>
+              <span className="status-pill">Rendered markdown</span>
             </header>
             <MarkdownPreview content={body} />
           </section>
         ) : (
-          <textarea
-            className="note-editor"
-            value={body}
-            onChange={(event) => setBody(event.target.value)}
-            placeholder="Write your thoughts here..."
-          />
+          <RichMarkdownEditor value={body} onChange={setBody} placeholder="Write your thoughts here..." />
         )}
       </section>
 
       {/* AI Copilot - Right Rail */}
       {aiPanelOpen ? (
-        <aside className="right-rail">
-          <div className="right-rail__header">
-            <button type="button" className="collapse-toggle" onClick={() => setAiPanelOpen(false)} aria-label="Collapse AI panel">
-              <PanelRightClose size={16} />
-            </button>
-          </div>
-          <AIActionPanel
-            output={aiOutput}
-            running={busy}
-            runningAction={activeTransformAction}
-            onRun={(action) => void runTransform(action)}
-            onStopTransform={() => transformAbortRef.current?.abort()}
-            transcriptChatEnabled={showCopilotChat}
-            chatDraft={copilotChatDraft}
-            chatHistory={copilotChatHistory}
-            chatBusy={copilotChatBusy}
-            onChatDraftChange={setCopilotChatDraft}
-            onSendChat={() => {
-              void runCopilotChat();
-            }}
-            onStopChat={() => copilotChatAbortRef.current?.abort()}
-            onClearChat={() => {
-              setCopilotChatHistory([]);
-              setCopilotChatDraft('');
-            }}
+        <div className="panel-shell panel-shell--right-rail">
+          <div
+            className="panel-resizer panel-resizer--left"
+            role="separator"
+            aria-label="Resize AI Copilot panel"
+            onPointerDown={(event) => startPanelResize('ai', event)}
           />
-        </aside>
+          <aside className="right-rail">
+            <div className="right-rail__header">
+              <button type="button" className="collapse-toggle" onClick={() => setAiPanelOpen(false)} aria-label="Collapse AI panel">
+                <PanelRightClose size={16} />
+              </button>
+            </div>
+            <AIActionPanel
+              output={aiOutput}
+              running={busy}
+              runningAction={activeTransformAction}
+              onRun={(action) => void runTransform(action)}
+              onStopTransform={() => transformAbortRef.current?.abort()}
+              transcriptChatEnabled={showCopilotChat}
+              chatDraft={copilotChatDraft}
+              chatHistory={copilotChatHistory}
+              chatBusy={copilotChatBusy}
+              onChatDraftChange={setCopilotChatDraft}
+              onSendChat={() => {
+                void runCopilotChat();
+              }}
+              onStopChat={() => copilotChatAbortRef.current?.abort()}
+              onClearChat={() => {
+                setCopilotChatHistory([]);
+                setCopilotChatDraft('');
+              }}
+            />
+          </aside>
+        </div>
       ) : (
         <div className="collapsed-rail">
           <button type="button" className="collapse-toggle vertical" onClick={() => setAiPanelOpen(true)} aria-label="Expand AI panel">
@@ -3073,20 +3406,23 @@ export default function App() {
 
       <SettingsModal
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          clearSettingsFeedback();
+          setSettingsOpen(false);
+        }}
+        settingsFeedback={settingsFeedback}
+        onClearSettingsFeedback={clearSettingsFeedback}
         providers={providers}
         byokProvider={byokProvider}
         byokValue={byokValue}
         byokSubmitting={byokSubmitting}
-        onByokProviderChange={setByokProvider}
+        onByokProviderChange={(value) => {
+          clearSettingsFeedback();
+          setByokProvider(value);
+        }}
         onByokValueChange={setByokValue}
         onSaveByok={() => {
           void handleSaveByok();
-        }}
-        onOpenOAuth={() => {
-          void openOpenAIOAuth().catch((error) => {
-            setMessage(error instanceof Error ? error.message : 'Unable to start OpenAI OAuth');
-          });
         }}
         disconnectingProvider={providerDisconnecting}
         onDisconnectProvider={(p) => {
@@ -3125,6 +3461,10 @@ export default function App() {
         onLogout={() => {
           void handleLogout();
         }}
+        transcriptionPreferences={transcriptionPreferences}
+        onTranscriptionPreferencesChange={(patch) => {
+          void handleTranscriptionPreferencesPatch(patch);
+        }}
         onConnectDrive={() => {
           void handleConnectGoogleDrive();
         }}
@@ -3146,6 +3486,11 @@ export default function App() {
           }
           setLlmTranscriptionModel(model);
         }}
+        markdownSettings={markdownSettings}
+        onMarkdownSettingsChange={(patch) => {
+          void handleMarkdownSettingsPatch(patch);
+        }}
+        buildVersion={buildVersion}
       />
     </main>
   );

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
+from .local_settings_store import LocalSettingsStore
 from .logging_setup import configure_sidecar_logging
 from .models import (
     AITransformRequest,
@@ -24,18 +26,25 @@ from .models import (
     InterviewTurnsResponse,
     LocalRootResponse,
     LocalRootUpdateRequest,
+    MarkdownSettings,
+    MarkdownSettingsUpdateRequest,
     MoveNoteRequest,
     NoteCreateRequest,
     NoteDocument,
     NoteUpdateRequest,
+    ProviderByokRequest,
     ProviderConnection,
-    ProviderStatusUpdateRequest,
+    ProviderDeleteResponse,
+    ProviderModel,
     StoragePreference,
     StoragePreferenceUpdateRequest,
     SyncStatus,
+    TranscriptionPreferences,
+    TranscriptionPreferencesUpdateRequest,
     TranscriptionChunkResponse,
 )
 from .notes_store import NoteStore
+from .provider_models import fetch_provider_models
 from .provider_status_store import ProviderStatusStore
 from .services.drive_sync_service import DriveSyncService
 from .storage_profile_store import StorageProfileStore
@@ -47,6 +56,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     sync_transport: httpx.AsyncBaseTransport | None = None,
+    provider_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     current_settings = settings or Settings()
     log = configure_sidecar_logging(current_settings.debug)
@@ -58,12 +68,13 @@ def create_app(
         current_settings.storage_profile_path,
         current_settings.sync_profile_path,
     )
+    local_settings_store = LocalSettingsStore(current_settings.settings_profile_path)
     startup_pref = storage_store.get_preference(note_store.get_local_root())
     if startup_pref.local_root:
         note_store.set_notes_dir(Path(startup_pref.local_root))
     storage_store.set_sync_enabled(startup_pref.mode == "local_and_drive")
-    ai_service = AIService(current_settings)
-    transcription_service = TranscriptionService(current_settings)
+    ai_service = AIService(current_settings, provider_status_store)
+    transcription_service = TranscriptionService(current_settings, provider_status_store)
     drive_sync_service = DriveSyncService(
         current_settings,
         note_store,
@@ -71,19 +82,39 @@ def create_app(
         transport=sync_transport,
     )
 
-    app = FastAPI(title="Notebook AI Local Sidecar", version="0.1.0")
+    app = FastAPI(title="Notebook AI Local Sidecar", version=current_settings.app_version)
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=list(current_settings.allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Notebook-Desktop-Token"],
     )
+
+    @app.middleware("http")
+    async def secure_desktop_surface(request, call_next):
+        if request.method != "OPTIONS" and request.url.path != "/health":
+            provided_token = request.headers.get("X-Notebook-Desktop-Token")
+            if not provided_token or not secrets.compare_digest(
+                provided_token,
+                current_settings.desktop_token,
+            ):
+                return JSONResponse(status_code=401, content={"detail": "Missing or invalid desktop token"})
+
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
-        return HealthResponse(status="ok")
+        return HealthResponse(
+            status="ok",
+            version=current_settings.app_version,
+            build_version=current_settings.resolved_build_version,
+        )
 
     @app.get("/notes", response_model=list[NoteDocument])
     async def list_notes(query: str = "", authorization: str | None = Header(default=None)) -> list[NoteDocument]:
@@ -215,6 +246,36 @@ def create_app(
         if enabled:
             drive_sync_service.request_full_resync()
         return storage_store.set_preference(mode=payload.mode, local_root=note_store.get_local_root())
+
+    @app.get("/settings/transcription", response_model=TranscriptionPreferences)
+    async def get_transcription_preferences(
+        authorization: str | None = Header(default=None),
+    ) -> TranscriptionPreferences:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return local_settings_store.get_transcription_preferences()
+
+    @app.put("/settings/transcription", response_model=TranscriptionPreferences)
+    async def update_transcription_preferences(
+        payload: TranscriptionPreferencesUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> TranscriptionPreferences:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return local_settings_store.set_transcription_preferences(payload)
+
+    @app.get("/settings/markdown", response_model=MarkdownSettings)
+    async def get_markdown_settings(
+        authorization: str | None = Header(default=None),
+    ) -> MarkdownSettings:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return local_settings_store.get_markdown_settings()
+
+    @app.put("/settings/markdown", response_model=MarkdownSettings)
+    async def update_markdown_settings(
+        payload: MarkdownSettingsUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ) -> MarkdownSettings:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return local_settings_store.set_markdown_settings(payload)
 
     @app.get("/sync/status", response_model=SyncStatus)
     async def get_sync_status(authorization: str | None = Header(default=None)) -> SyncStatus:
@@ -354,6 +415,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Audio chunk is empty")
 
         mode = transcription_mode if transcription_mode in {"whisper", "llm"} else "whisper"
+        transcription_preferences = local_settings_store.get_transcription_preferences()
 
         log.info(
             "POST /transcription/chunk bytes=%s filename=%s provider=%s mode=%s segment_id=%s",
@@ -375,6 +437,9 @@ def create_app(
             context_preset=context_preset,
             context_text=context_text,
             source_hint=source_hint,
+            main_language=transcription_preferences.main_language,
+            spoken_languages=transcription_preferences.spoken_languages,
+            custom_vocabulary=transcription_preferences.custom_vocabulary,
             access_token=_bearer_token_from_header(authorization),
         )
 
@@ -405,13 +470,53 @@ def create_app(
             openrouter_key=current_settings.openrouter_api_key,
         )
 
-    @app.post("/providers/status/cache", response_model=list[ProviderConnection])
-    async def cache_provider_status(payload: ProviderStatusUpdateRequest) -> list[ProviderConnection]:
-        provider_status_store.cache_status(
-            provider=payload.provider,
-            via=payload.via,
-            connected=payload.connected,
+    @app.post("/providers/byok", response_model=list[ProviderConnection])
+    async def save_provider_byok(payload: ProviderByokRequest) -> list[ProviderConnection]:
+        provider_status_store.save_api_key(payload.provider, payload.api_key.strip())
+        return provider_status_store.get_statuses(
+            openai_key=current_settings.openai_api_key,
+            openrouter_key=current_settings.openrouter_api_key,
         )
+
+    @app.get("/providers/models", response_model=list[ProviderModel])
+    async def provider_models(provider: str, use_case: str = "copilot") -> list[ProviderModel]:
+        if provider not in {"openai", "openrouter"}:
+            raise HTTPException(status_code=404, detail="Unsupported provider")
+        if use_case not in {"copilot", "transcription"}:
+            raise HTTPException(status_code=400, detail="Unsupported use_case")
+
+        api_key = provider_status_store.get_api_key(
+            provider,
+            current_settings.openai_api_key,
+            current_settings.openrouter_api_key,
+        )
+        if not api_key:
+            raise HTTPException(status_code=404, detail="Credential not found")
+
+        return await fetch_provider_models(
+            provider=provider,
+            api_key=api_key,
+            use_case=use_case,
+            transport=provider_transport,
+        )
+
+    @app.delete("/providers/{provider}", response_model=ProviderDeleteResponse)
+    async def delete_provider_connection(provider: str) -> ProviderDeleteResponse:
+        if provider not in {"openai", "openrouter"}:
+            raise HTTPException(status_code=404, detail="Unsupported provider")
+
+        provider_status_store.delete_provider(provider)
+        still_connected = bool(
+            provider_status_store.get_api_key(
+                provider,
+                current_settings.openai_api_key,
+                current_settings.openrouter_api_key,
+            )
+        )
+        return ProviderDeleteResponse(provider=provider, connected=still_connected)
+
+    @app.post("/providers/status/cache", response_model=list[ProviderConnection])
+    async def cache_provider_status() -> list[ProviderConnection]:
         return provider_status_store.get_statuses(
             openai_key=current_settings.openai_api_key,
             openrouter_key=current_settings.openrouter_api_key,
@@ -420,7 +525,27 @@ def create_app(
     return app
 
 
-app = create_app()
+def _create_default_app() -> FastAPI:
+    try:
+        return create_app()
+    except (OSError, PermissionError) as exc:
+        fallback = FastAPI(title="Notebook AI Local Sidecar", version="0.1.0")
+
+        @fallback.get("/health")
+        async def health() -> JSONResponse:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "misconfigured",
+                    "service": "local-sidecar",
+                    "detail": str(exc),
+                },
+            )
+
+        return fallback
+
+
+app = _create_default_app()
 
 
 def _sse_event(event: str, data: str) -> str:

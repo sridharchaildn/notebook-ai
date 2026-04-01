@@ -42,11 +42,13 @@ def test_structured_note_roundtrip(tmp_path: Path):
     assert reloaded.frontmatter.id == created.frontmatter.id
     assert reloaded.frontmatter.title == "Sprint Plan v2"
     assert reloaded.content == "Updated body"
+    assert reloaded.content_format == "markdown"
     assert reloaded.frontmatter.provider == "openrouter"
     assert reloaded.frontmatter.model == "openai/gpt-4o-mini"
     assert reloaded.frontmatter.context_preset == "meeting"
     assert reloaded.frontmatter.context_text == "Review with design and engineering leads"
-    assert (tmp_path / "notes" / f"{created.frontmatter.id}.note.json").exists()
+    assert (tmp_path / "notes" / "unfiled" / created.frontmatter.id / "_meta.json").exists()
+    assert (tmp_path / "notes" / "unfiled" / created.frontmatter.id / "note.md").exists()
 
     search = store.list_notes(query="updated")
     assert len(search) == 1
@@ -93,7 +95,8 @@ def test_legacy_markdown_import_migrates_on_save(tmp_path: Path):
     )
 
     assert updated.frontmatter.title == "Legacy note updated"
-    assert (notes_dir / "legacy-note.note.json").exists()
+    assert (notes_dir / "unfiled" / "legacy-note" / "_meta.json").exists()
+    assert (notes_dir / "unfiled" / "legacy-note" / "note.md").exists()
     assert not legacy_path.exists()
 
 
@@ -152,3 +155,4 @@ def test_transcript_segments_roundtrip(tmp_path: Path):
     assert reloaded.session.session_type == "transcript"
     assert len(reloaded.session.segments) == 2
     assert reloaded.session.segments[0].source_hint == "me"
+    assert (tmp_path / "notes" / "unfiled" / created.frontmatter.id / "transcript.md").exists()

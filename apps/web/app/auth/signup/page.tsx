@@ -4,18 +4,10 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { UICard, UIButton, UIInput } from '@notebook-ai/ui';
-import { acceptLegalDocuments, fetchLegalDocuments, getCurrentSupabaseUser } from '../../../lib/cloud';
+import { getCurrentSupabaseUser } from '../../../lib/cloud';
 import { buildAuthCallbackUrl, getSupabaseClient, isSupabaseConfigured } from '../../../lib/supabase';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { AppLogo } from '../../components/AppLogo';
-
-function CheckSvg() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
-      <path fillRule="evenodd" d="M12.416 3.376a.75.75 0 0 1 .208 1.04l-5 7.5a.75.75 0 0 1-1.154.114l-3-3a.75.75 0 0 1 1.06-1.06l2.353 2.353 4.493-6.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" />
-    </svg>
-  );
-}
 
 function ArrowLeftIcon() {
   return (
@@ -41,29 +33,11 @@ export default function SignUpPage() {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
-  const [privacyAccepted, setPrivacyAccepted] = useState(false);
-  const [termsAccepted, setTermsAccepted] = useState(false);
-  const [privacyVersion, setPrivacyVersion] = useState('2026-03-25');
-  const [termsVersion, setTermsVersion] = useState('2026-03-25');
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const queryEmail = params.get('email');
     if (queryEmail) setEmail(queryEmail);
-  }, []);
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        const docs = await fetchLegalDocuments();
-        const privacy = docs.find((doc) => doc.type === 'privacy_policy');
-        const terms = docs.find((doc) => doc.type === 'user_agreement');
-        if (privacy?.version) setPrivacyVersion(privacy.version);
-        if (terms?.version) setTermsVersion(terms.version);
-      } catch {
-        // Keep defaults for local/offline development.
-      }
-    })();
   }, []);
 
   async function handleGoogleSignUp() {
@@ -93,20 +67,10 @@ export default function SignUpPage() {
   }
 
   async function handleSubmit() {
-    if (!privacyAccepted || !termsAccepted) {
-      setMessage('Accept Privacy Policy and User Agreement to continue.');
-      return;
-    }
-
     setLoading(true);
     setMessage('');
     try {
       const currentUser = await getCurrentSupabaseUser();
-      await acceptLegalDocuments([
-        { type: 'privacy_policy', version: privacyVersion },
-        { type: 'user_agreement', version: termsVersion },
-      ]);
-
       const next = new URLSearchParams();
       if (currentUser.email) next.set('email', currentUser.email);
       router.push(`/onboarding?${next.toString()}`);
@@ -135,7 +99,7 @@ export default function SignUpPage() {
             Create your account
           </h1>
           <p className="muted" style={{ margin: '0 0 24px', fontSize: '0.88rem', lineHeight: 1.6 }}>
-            Get started with Notebook AI and accept legal terms to continue.
+            Get started with Notebook AI and continue to onboarding.
           </p>
 
           <div className="form-stack">
@@ -158,22 +122,6 @@ export default function SignUpPage() {
                 placeholder="you@company.com"
                 type="email"
               />
-            </label>
-
-            <label className="custom-checkbox">
-              <input type="checkbox" checked={privacyAccepted} onChange={(event) => setPrivacyAccepted(event.target.checked)} />
-              <span className="checkbox-mark"><CheckSvg /></span>
-              <span>
-                I agree to the <Link href="/legal/privacy" style={{ textDecoration: 'underline', color: 'var(--text)' }}>Privacy Policy</Link> (v{privacyVersion})
-              </span>
-            </label>
-
-            <label className="custom-checkbox">
-              <input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} />
-              <span className="checkbox-mark"><CheckSvg /></span>
-              <span>
-                I agree to the <Link href="/legal/terms" style={{ textDecoration: 'underline', color: 'var(--text)' }}>User Agreement</Link> (v{termsVersion})
-              </span>
             </label>
 
             <UIButton onClick={() => { void handleSubmit(); }} disabled={loading} style={{ marginTop: 4, width: '100%', justifyContent: 'center' }}>

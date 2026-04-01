@@ -1,6 +1,4 @@
 import type {
-  LegalAcceptanceRecord,
-  LegalDocument,
   OAuthStartResponse,
   StoragePreference,
   SupabaseSessionPayload,
@@ -11,10 +9,6 @@ const CLOUD_API_URL = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? 'http://127.0.0.1
 
 export function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
-}
-
-export function isLegalAcceptanceRequiredError(error: unknown): boolean {
-  return errorMessage(error, '').includes('Legal acceptance incomplete');
 }
 
 async function parseError(res: Response): Promise<Error> {
@@ -76,34 +70,6 @@ export async function getCurrentSupabaseSessionPayload(): Promise<SupabaseSessio
 export async function getCurrentSupabaseUser(): Promise<SupabaseSessionPayload['user']> {
   const session = await getCloudSession();
   return session.user;
-}
-
-export async function fetchLegalDocuments(): Promise<LegalDocument[]> {
-  const res = await fetch(`${CLOUD_API_URL}/legal/current`, { cache: 'no-store' });
-  if (!res.ok) throw await parseError(res);
-  const payload = (await res.json()) as { documents: LegalDocument[] };
-  return payload.documents;
-}
-
-export async function acceptLegalDocuments(
-  acceptances: Array<{ type: 'privacy_policy' | 'user_agreement'; version: string }>,
-): Promise<LegalAcceptanceRecord[]> {
-  const res = await fetch(`${CLOUD_API_URL}/legal/accept`, {
-    method: 'POST',
-    headers: await getAuthHeaders(),
-    body: JSON.stringify({ acceptances }),
-  });
-  if (!res.ok) throw await parseError(res);
-  return (await res.json()) as LegalAcceptanceRecord[];
-}
-
-export async function fetchLegalAcceptances(): Promise<LegalAcceptanceRecord[]> {
-  const res = await fetch(`${CLOUD_API_URL}/legal/accept`, {
-    cache: 'no-store',
-    headers: await getAuthHeaders(),
-  });
-  if (!res.ok) throw await parseError(res);
-  return (await res.json()) as LegalAcceptanceRecord[];
 }
 
 export async function saveProviderByok(

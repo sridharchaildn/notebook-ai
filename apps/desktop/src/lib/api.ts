@@ -9,8 +9,7 @@ import type {
   InterviewAssistRequest,
   InterviewTurnsRequest,
   InterviewTurnsResponse,
-  LegalAcceptanceRecord,
-  LegalDocument,
+  MarkdownSettings,
   ModelUseCase,
   MoveNoteRequest,
   NoteAIContext,
@@ -24,6 +23,7 @@ import type {
   ProviderModel,
   StoragePreference,
   SyncStatus,
+  TranscriptionPreferences,
   TranscriptionChunkResponse,
 } from '@notebook-ai/contracts';
 
@@ -31,7 +31,7 @@ const LOCAL_BASE_URL = import.meta.env.VITE_LOCAL_API_URL ?? 'http://127.0.0.1:8
 const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? 'http://127.0.0.1:8790';
 
 const AUTH_INVALID_EVENT = 'notebook:auth-invalid';
-const RENDERER_AUTH_SESSION_KEY = 'notebook-desktop-renderer-session';
+const LOCAL_DESKTOP_TOKEN_HEADER = 'X-Notebook-Desktop-Token';
 
 export interface DesktopRendererSession {
   accessToken: string;
@@ -41,6 +41,7 @@ export interface DesktopRendererSession {
 }
 
 let rendererSessionFallback: DesktopRendererSession | null = null;
+let localDesktopTokenFallback: string | null = null;
 
 export class DesktopAuthExpiredError extends Error {
   constructor(message = 'Session expired. Sign in again.') {
@@ -57,44 +58,12 @@ export function authInvalidEventName(): string {
   return AUTH_INVALID_EVENT;
 }
 
-function parseRendererSessionFallback(rawValue: string | null): DesktopRendererSession | null {
-  if (!rawValue) return null;
-  try {
-    const payload = JSON.parse(rawValue) as Partial<DesktopRendererSession>;
-    if (
-      typeof payload.accessToken !== 'string' ||
-      typeof payload.userId !== 'string' ||
-      payload.userId.trim().length === 0
-    ) {
-      return null;
-    }
-    return {
-      accessToken: payload.accessToken,
-      expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : null,
-      userId: payload.userId,
-      userEmail: typeof payload.userEmail === 'string' ? payload.userEmail : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export function getRendererSessionFallback(): DesktopRendererSession | null {
-  if (rendererSessionFallback) return rendererSessionFallback;
-  if (typeof window === 'undefined') return null;
-  const parsed = parseRendererSessionFallback(window.localStorage.getItem(RENDERER_AUTH_SESSION_KEY));
-  rendererSessionFallback = parsed;
-  return parsed;
+  return rendererSessionFallback;
 }
 
 export function setRendererSessionFallback(session: DesktopRendererSession | null) {
   rendererSessionFallback = session;
-  if (typeof window === 'undefined') return;
-  if (session) {
-    window.localStorage.setItem(RENDERER_AUTH_SESSION_KEY, JSON.stringify(session));
-    return;
-  }
-  window.localStorage.removeItem(RENDERER_AUTH_SESSION_KEY);
 }
 
 async function getDesktopAuthSession() {
@@ -136,21 +105,51 @@ async function localAuthHeaders(
   contentType: 'json' | 'none' = 'json',
 ): Promise<Record<string, string>> {
   const accessToken = await getDesktopAccessToken();
+  const desktopToken = await getLocalDesktopToken();
   return {
     ...(contentType === 'json' ? { 'Content-Type': 'application/json' } : {}),
+    [LOCAL_DESKTOP_TOKEN_HEADER]: desktopToken,
     ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
   };
 }
 
+async function getLocalDesktopToken(): Promise<string> {
+  if (localDesktopTokenFallback) return localDesktopTokenFallback;
+  const bridgeToken = await window.notebookDesktop?.getLocalApiToken?.();
+  if (!bridgeToken) {
+    throw new Error('Desktop local API token unavailable.');
+  }
+  localDesktopTokenFallback = bridgeToken;
+  return bridgeToken;
+}
+
+function isDesktopTokenMismatch(status: number, detail: string | null): boolean {
+  if (status !== 401 || !detail) return false;
+  const normalized = detail.trim().toLowerCase();
+  return normalized.includes('desktop token') && (normalized.includes('missing') || normalized.includes('invalid'));
+}
+
+function desktopTokenMismatchMessage(): string {
+  return 'Desktop token mismatch. Restart the desktop app, or restart the sidecar with the matching NOTEBOOK_LOCAL_DESKTOP_TOKEN.';
+}
+
 async function parseResponseError(res: Response, fallback: string): Promise<Error> {
+  let detail: string | null = null;
   try {
     const payload = (await res.json()) as { detail?: string };
     if (typeof payload.detail === 'string' && payload.detail.trim().length > 0) {
-      return new Error(payload.detail);
+      detail = payload.detail.trim();
     }
   } catch {
     /* ignore */
   }
+  if (isDesktopTokenMismatch(res.status, detail)) {
+    return new Error(desktopTokenMismatchMessage());
+  }
+  if (detail) {
+    return new Error(detail);
+  }
+  if (res.status === 401) return new Error(desktopTokenMismatchMessage());
   return new Error(fallback);
 }
 
@@ -205,6 +204,7 @@ export interface SaveNoteInput {
   tags: string[];
   provider?: ProviderId;
   model?: string;
+  folder_id?: string | null;
   kind?: NoteKind;
   content_format?: ContentFormat;
   session?: NoteSessionData | null;
@@ -217,7 +217,7 @@ export async function fetchNotes(query = ''): Promise<NoteDocument[]> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to load notes.');
+    throw await parseResponseError(res, 'Failed to load notes.');
   }
   return (await res.json()) as NoteDocument[];
 }
@@ -229,7 +229,7 @@ export async function createNote(payload: Omit<SaveNoteInput, 'id'>): Promise<No
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error('Failed to create note.');
+    throw await parseResponseError(res, 'Failed to create note.');
   }
   return (await res.json()) as NoteDocument;
 }
@@ -241,7 +241,7 @@ export async function updateNote(payload: SaveNoteInput): Promise<NoteDocument> 
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error('Failed to save note.');
+    throw await parseResponseError(res, 'Failed to save note.');
   }
   return (await res.json()) as NoteDocument;
 }
@@ -252,7 +252,7 @@ export async function deleteNote(noteId: string): Promise<void> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to delete note.');
+    throw await parseResponseError(res, 'Failed to delete note.');
   }
 }
 
@@ -263,7 +263,7 @@ export async function moveNote(noteId: string, payload: MoveNoteRequest): Promis
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error('Failed to move note.');
+    throw await parseResponseError(res, 'Failed to move note.');
   }
   return (await res.json()) as NoteDocument;
 }
@@ -273,7 +273,7 @@ export async function fetchFolders(): Promise<FolderNode[]> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to load folders.');
+    throw await parseResponseError(res, 'Failed to load folders.');
   }
   return (await res.json()) as FolderNode[];
 }
@@ -285,7 +285,7 @@ export async function createFolder(name: string): Promise<FolderNode> {
     body: JSON.stringify({ name }),
   });
   if (!res.ok) {
-    throw new Error('Failed to create folder.');
+    throw await parseResponseError(res, 'Failed to create folder.');
   }
   return (await res.json()) as FolderNode;
 }
@@ -297,7 +297,7 @@ export async function renameFolder(folderId: string, name: string): Promise<Fold
     body: JSON.stringify({ name }),
   });
   if (!res.ok) {
-    throw new Error('Failed to rename folder.');
+    throw await parseResponseError(res, 'Failed to rename folder.');
   }
   return (await res.json()) as FolderNode;
 }
@@ -308,7 +308,7 @@ export async function deleteFolder(folderId: string): Promise<void> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to delete folder.');
+    throw await parseResponseError(res, 'Failed to delete folder.');
   }
 }
 
@@ -317,7 +317,7 @@ export async function fetchLocalRoot(): Promise<string> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to load local storage folder.');
+    throw await parseResponseError(res, 'Failed to load local storage folder.');
   }
   const payload = (await res.json()) as { local_root: string };
   return payload.local_root;
@@ -330,7 +330,7 @@ export async function setLocalRoot(localRoot: string): Promise<string> {
     body: JSON.stringify({ local_root: localRoot }),
   });
   if (!res.ok) {
-    throw new Error('Failed to update local storage folder.');
+    throw await parseResponseError(res, 'Failed to update local storage folder.');
   }
   const payload = (await res.json()) as { local_root: string };
   return payload.local_root;
@@ -341,7 +341,7 @@ export async function fetchStoragePreference(): Promise<StoragePreference> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to load storage preference.');
+    throw await parseResponseError(res, 'Failed to load storage preference.');
   }
   return (await res.json()) as StoragePreference;
 }
@@ -353,9 +353,57 @@ export async function updateStoragePreference(mode: StoragePreference['mode']): 
     body: JSON.stringify({ mode }),
   });
   if (!res.ok) {
-    throw new Error('Failed to update storage preference.');
+    throw await parseResponseError(res, 'Failed to update storage preference.');
   }
   return (await res.json()) as StoragePreference;
+}
+
+export async function fetchTranscriptionPreferences(): Promise<TranscriptionPreferences> {
+  const res = await fetch(`${LOCAL_BASE_URL}/settings/transcription`, {
+    headers: await localAuthHeaders('none'),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Failed to load transcription settings.');
+  }
+  return (await res.json()) as TranscriptionPreferences;
+}
+
+export async function updateTranscriptionPreferences(
+  payload: Omit<TranscriptionPreferences, 'updated_at'>,
+): Promise<TranscriptionPreferences> {
+  const res = await fetch(`${LOCAL_BASE_URL}/settings/transcription`, {
+    method: 'PUT',
+    headers: await localAuthHeaders('json'),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Failed to update transcription settings.');
+  }
+  return (await res.json()) as TranscriptionPreferences;
+}
+
+export async function fetchMarkdownSettings(): Promise<MarkdownSettings> {
+  const res = await fetch(`${LOCAL_BASE_URL}/settings/markdown`, {
+    headers: await localAuthHeaders('none'),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Failed to load markdown settings.');
+  }
+  return (await res.json()) as MarkdownSettings;
+}
+
+export async function updateMarkdownSettings(
+  payload: Omit<MarkdownSettings, 'updated_at'>,
+): Promise<MarkdownSettings> {
+  const res = await fetch(`${LOCAL_BASE_URL}/settings/markdown`, {
+    method: 'PUT',
+    headers: await localAuthHeaders('json'),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Failed to update markdown settings.');
+  }
+  return (await res.json()) as MarkdownSettings;
 }
 
 export async function fetchSyncStatus(): Promise<SyncStatus> {
@@ -363,7 +411,7 @@ export async function fetchSyncStatus(): Promise<SyncStatus> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to load sync status.');
+    throw await parseResponseError(res, 'Failed to load sync status.');
   }
   return (await res.json()) as SyncStatus;
 }
@@ -374,7 +422,7 @@ export async function runSyncNow(): Promise<SyncStatus> {
     headers: await localAuthHeaders('none'),
   });
   if (!res.ok) {
-    throw new Error('Failed to run sync.');
+    throw await parseResponseError(res, 'Failed to run sync.');
   }
   return (await res.json()) as SyncStatus;
 }
@@ -404,126 +452,55 @@ export async function logoutCloudSession(): Promise<void> {
   );
 }
 
-export async function fetchLegalDocuments(): Promise<LegalDocument[]> {
-  const res = await fetch(`${CLOUD_BASE_URL}/legal/current`, { cache: 'no-store' });
-  if (!res.ok) {
-    throw await parseResponseError(res, 'Unable to load legal documents.');
-  }
-  const payload = (await res.json()) as { documents: LegalDocument[] };
-  return payload.documents;
-}
-
-export async function fetchLegalAcceptances(): Promise<LegalAcceptanceRecord[]> {
-  const response = await cloudFetch(
-    '/legal/accept',
-    { headers: await authorizedCloudHeaders('none') },
-    'Unable to load legal acceptance status.',
-  );
-  return (await response.json()) as LegalAcceptanceRecord[];
-}
-
-export async function acceptLegalDocuments(
-  acceptances: Array<{ type: 'privacy_policy' | 'user_agreement'; version: string }>,
-): Promise<LegalAcceptanceRecord[]> {
-  const response = await cloudFetch(
-    '/legal/accept',
-    {
-      method: 'POST',
-      headers: await authorizedCloudHeaders('json'),
-      body: JSON.stringify({ acceptances }),
-    },
-    'Unable to accept legal documents.',
-  );
-  return (await response.json()) as LegalAcceptanceRecord[];
-}
-
 export async function fetchProviderStatus(): Promise<ProviderConnection[]> {
-  const [local, cloud] = await Promise.all([
-    fetch(`${LOCAL_BASE_URL}/providers/status`)
-      .then(async (res) => {
-        if (!res.ok) return [] as ProviderConnection[];
-        return (await res.json()) as ProviderConnection[];
-      })
-      .catch(() => [] as ProviderConnection[]),
-    cloudFetch('/providers/status', { headers: await authorizedCloudHeaders('none') }, 'Unable to load provider status')
-      .then(async (res) => (await res.json()) as ProviderConnection[])
-      .catch((error) => {
-        if (error instanceof DesktopAuthExpiredError) throw error;
-        return [] as ProviderConnection[];
-      }),
-  ]);
+  const response = await fetch(`${LOCAL_BASE_URL}/providers/status`, {
+    headers: await localAuthHeaders('none'),
+  }).catch(() => null);
 
-  if (local.length === 0 && cloud.length === 0) {
-    throw new Error('Unable to load provider status');
+  if (!response?.ok) {
+    throw response
+      ? await parseResponseError(response, 'Unable to load provider status.')
+      : new Error('Unable to load provider status.');
   }
-
-  const merged = new Map<string, ProviderConnection>();
-  for (const status of local) {
-    merged.set(status.provider, status);
-  }
-  for (const status of cloud) {
-    const existing = merged.get(status.provider);
-    if (!existing || (!existing.connected && status.connected)) {
-      merged.set(status.provider, status);
-    }
-  }
-
-  return Array.from(merged.values());
+  return (await response.json()) as ProviderConnection[];
 }
 
 export async function fetchProviderModels(
   provider: ProviderId,
   useCase: ModelUseCase,
 ): Promise<ProviderModel[]> {
-  const response = await cloudFetch(
-    `/providers/models?provider=${encodeURIComponent(provider)}&use_case=${encodeURIComponent(useCase)}`,
-    { headers: await authorizedCloudHeaders('none') },
-    'Unable to load provider models.',
+  const response = await fetch(
+    `${LOCAL_BASE_URL}/providers/models?provider=${encodeURIComponent(provider)}&use_case=${encodeURIComponent(useCase)}`,
+    { headers: await localAuthHeaders('none') },
   );
+  if (!response.ok) {
+    throw await parseResponseError(response, 'Unable to load provider models.');
+  }
   return (await response.json()) as ProviderModel[];
 }
 
 export async function storeByok(provider: ProviderId, apiKey: string): Promise<void> {
-  await cloudFetch(
-    '/providers/byok',
-    {
-      method: 'POST',
-      headers: await authorizedCloudHeaders('json'),
-      body: JSON.stringify({
-        provider,
-        api_key: apiKey,
-      }),
-    },
-    'Unable to save provider key.',
-  );
-
-  await fetch(`${LOCAL_BASE_URL}/providers/status/cache`, {
+  const response = await fetch(`${LOCAL_BASE_URL}/providers/byok`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, via: 'api_key', connected: true }),
+    headers: await localAuthHeaders('json'),
+    body: JSON.stringify({
+      provider,
+      api_key: apiKey,
+    }),
   });
-}
-
-export async function openOpenAIOAuth(): Promise<void> {
-  const payload = await startOAuthFlow('/providers/openai/oauth/start');
-  await openExternalUrl(payload.url);
+  if (!response.ok) {
+    throw await parseResponseError(response, 'Unable to save provider key.');
+  }
 }
 
 export async function disconnectProvider(provider: ProviderId): Promise<void> {
-  await cloudFetch(
-    `/providers/${encodeURIComponent(provider)}`,
-    {
-      method: 'DELETE',
-      headers: await authorizedCloudHeaders('none'),
-    },
-    'Unable to disconnect provider.',
-  );
-
-  await fetch(`${LOCAL_BASE_URL}/providers/status/cache`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, via: 'api_key', connected: false }),
+  const response = await fetch(`${LOCAL_BASE_URL}/providers/${encodeURIComponent(provider)}`, {
+    method: 'DELETE',
+    headers: await localAuthHeaders('none'),
   });
+  if (!response.ok) {
+    throw await parseResponseError(response, 'Unable to disconnect provider.');
+  }
 }
 
 export async function streamTransform(

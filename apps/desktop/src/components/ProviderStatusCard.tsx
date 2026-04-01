@@ -1,5 +1,5 @@
 import type { ProviderConnection } from '@notebook-ai/contracts';
-import { CircleCheckBig, CircleDashed, KeyRound, Link } from 'lucide-react';
+import { CircleCheckBig, CircleDashed, KeyRound } from 'lucide-react';
 
 interface Props {
   providers: ProviderConnection[];
@@ -9,7 +9,6 @@ interface Props {
   onByokProviderChange: (value: 'openai' | 'openrouter') => void;
   onByokValueChange: (value: string) => void;
   onSaveByok: () => void;
-  onOpenOAuth: () => void;
 }
 
 const providerLabel: Record<ProviderConnection['provider'], string> = {
@@ -25,7 +24,6 @@ export function ProviderStatusCard({
   onByokProviderChange,
   onByokValueChange,
   onSaveByok,
-  onOpenOAuth,
 }: Props) {
   return (
     <section className="provider-panel">
@@ -44,16 +42,13 @@ export function ProviderStatusCard({
                 <CircleDashed size={14} className="muted" />
               )}
             </div>
-            <small>{entry.connected ? `Connected via ${entry.via}` : 'Not connected'}</small>
+            <small>
+              {entry.connected
+                ? `Connected via ${entry.via}; ${entry.scope === 'desktop_local' ? 'stored locally on this device' : 'source unavailable'}.`
+                : 'No local key saved on this device.'}
+            </small>
           </article>
         ))}
-      </div>
-
-      <div className="provider-actions">
-        <button type="button" className="cta-btn" onClick={onOpenOAuth}>
-          <Link size={15} />
-          Connect OpenAI OAuth
-        </button>
       </div>
 
       <div className="byok-form">

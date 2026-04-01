@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.config import Settings
 from app.models import AITransformRequest, CopilotChatRequest, InterviewCoachRequest, InterviewTurn, InterviewTurnsRequest, NoteAIContext
+from app.provider_status_store import ProviderStatusStore
 from app.services.ai_service import AIService, _build_note_context_block
 
 
@@ -12,6 +13,11 @@ async def collect_tokens(service: AIService, payload: AITransformRequest) -> str
     return "".join(chunks)
 
 
+def _build_service(settings: Settings) -> AIService:
+    provider_store = ProviderStatusStore(settings.profile_path)
+    return AIService(settings, provider_store)
+
+
 async def test_local_fallback_summary_without_api_keys(tmp_path):
     settings = Settings(
         notes_dir=tmp_path / "notes",
@@ -19,7 +25,7 @@ async def test_local_fallback_summary_without_api_keys(tmp_path):
         openai_api_key=None,
         openrouter_api_key=None,
     )
-    service = AIService(settings)
+    service = _build_service(settings)
 
     output = await collect_tokens(
         service,
@@ -67,7 +73,7 @@ async def test_local_fallback_action_items(tmp_path):
         openai_api_key=None,
         openrouter_api_key=None,
     )
-    service = AIService(settings)
+    service = _build_service(settings)
 
     output = await collect_tokens(
         service,
@@ -88,7 +94,7 @@ async def test_interview_turns_dedup_on_same_transcript(tmp_path):
         openai_api_key=None,
         openrouter_api_key=None,
     )
-    service = AIService(settings)
+    service = _build_service(settings)
 
     first = await service.extract_interview_turns(
         InterviewTurnsRequest(
@@ -117,7 +123,7 @@ async def test_interview_turns_append_new_question_once(tmp_path):
         openai_api_key=None,
         openrouter_api_key=None,
     )
-    service = AIService(settings)
+    service = _build_service(settings)
 
     first = await service.extract_interview_turns(
         InterviewTurnsRequest(
@@ -173,7 +179,7 @@ async def test_interview_coach_fallback_is_short_plain_text(tmp_path):
         openai_api_key=None,
         openrouter_api_key=None,
     )
-    service = AIService(settings)
+    service = _build_service(settings)
 
     payload = InterviewCoachRequest(
         latest_interviewer_turn=InterviewTurn(
@@ -207,7 +213,7 @@ async def test_copilot_chat_fallback_uses_note_content(tmp_path):
         openai_api_key=None,
         openrouter_api_key=None,
     )
-    service = AIService(settings)
+    service = _build_service(settings)
 
     payload = CopilotChatRequest(
         question="What did I commit to?",

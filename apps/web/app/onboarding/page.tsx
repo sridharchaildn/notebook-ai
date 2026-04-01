@@ -116,7 +116,7 @@ export default function OnboardingPage() {
                 </div>
                 <div className="onboarding-step-title-wrap">
                   <h3 className="onboarding-step-title">Connect AI</h3>
-                  <p className="onboarding-step-desc">Use OpenAI OAuth or add API keys. OpenRouter is supported now.</p>
+                  <p className="onboarding-step-desc">Use OpenAI OAuth or add API keys. Web keys are stored server-side in your encrypted account vault.</p>
                 </div>
                 <span className={`onboarding-mini-pill ${hasApiKey ? 'success' : ''}`}>{hasApiKey ? 'Key added' : 'Optional'}</span>
               </div>
@@ -148,6 +148,7 @@ export default function OnboardingPage() {
                   OpenRouter API key (optional)
                   <UIInput value={openrouterKey} onChange={setOpenrouterKey} placeholder="sk-or-v1-..." type="password" />
                 </label>
+                <p className="muted onboarding-hint">Browser storage keeps your signed-in session, not raw provider API keys.</p>
               </div>
             </UICard>
 

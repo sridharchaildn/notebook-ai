@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import type { TranscriptionEngine } from '../lib/api';
 import { sourceHintLabel } from '../lib/noteMetadata';
 import { ModelPicker, providerLabel } from './ProviderModelPicker';
+import { RichMarkdownEditor } from './RichMarkdownEditor';
 
 interface Props {
   title?: string;
@@ -40,6 +41,7 @@ interface Props {
   onCopilotProviderChange: (provider: ProviderId) => void;
   onCopilotModelChange: (model: string) => void;
   onTabChange: (tab: 'transcript' | 'summary') => void;
+  onSummaryChange?: (value: string) => void;
 }
 
 export function TranscriptSessionView({
@@ -71,14 +73,11 @@ export function TranscriptSessionView({
   onCopilotProviderChange,
   onCopilotModelChange,
   onTabChange,
+  onSummaryChange,
 }: Props) {
   const [quickSetupOpen, setQuickSetupOpen] = useState(false);
   const [showSpeakerSplit, setShowSpeakerSplit] = useState(false);
   const paragraphs = transcript
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean);
-  const summaryParagraphs = summary
     .split(/\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean);
@@ -270,12 +269,12 @@ export function TranscriptSessionView({
       ) : null}
       <article className="transcript-session-view__body">
         {activeTab === 'summary' ? (
-          summary.trim() ? (
-            <div className="transcript-session-view__plain">
-              {summaryParagraphs.map((paragraph, index) => (
-                <p key={`${paragraph.slice(0, 24)}-${index}`}>{paragraph}</p>
-              ))}
-            </div>
+          summary.trim() || onSummaryChange ? (
+            <RichMarkdownEditor
+              value={summary}
+              onChange={(value) => onSummaryChange?.(value)}
+              placeholder={summaryBusy ? 'Generating summary...' : 'Run Summarize in Copilot or edit the summary here.'}
+            />
           ) : summaryBusy ? (
             <div className="transcript-session-view__empty">
               Generating summary...

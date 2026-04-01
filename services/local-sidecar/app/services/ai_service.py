@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import re
 from collections.abc import AsyncIterator
-
-import httpx
 
 from ..config import Settings
 from ..models import (
@@ -19,32 +16,15 @@ from ..models import (
     InterviewTurnsResponse,
     NoteAIContext,
 )
+from ..provider_status_store import ProviderStatusStore
 from ..providers import OpenAIAdapter, OpenRouterAdapter
 
 
 class AIService:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, provider_store: ProviderStatusStore):
         self.settings = settings
+        self.provider_store = provider_store
         self._adapter_cache: dict[str, OpenAIAdapter | OpenRouterAdapter | None] = {}
-
-        self._openai = (
-            OpenAIAdapter(
-                api_key=settings.openai_api_key,
-                default_model=settings.openai_model,
-            )
-            if settings.openai_api_key
-            else None
-        )
-
-        self._openrouter = (
-            OpenRouterAdapter(
-                api_key=settings.openrouter_api_key,
-                default_model=settings.openrouter_model,
-                base_url=settings.openrouter_base_url,
-            )
-            if settings.openrouter_api_key
-            else None
-        )
 
     async def stream_transform(
         self,
@@ -184,64 +164,32 @@ class AIService:
             yield token
 
     async def _resolve_adapter(self, provider: str, access_token: str | None = None):
-        if provider == "openrouter" and self._openrouter:
-            return self._openrouter
-        if provider == "openai" and self._openai:
-            return self._openai
+        _ = access_token
+        api_key = self.provider_store.get_api_key(
+            provider,
+            self.settings.openai_api_key,
+            self.settings.openrouter_api_key,
+        )
+        if not api_key:
+            return None
 
-        cache_key = f"{provider}:{hash(access_token or '')}"
+        cache_key = f"{provider}:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()}"
         if cache_key in self._adapter_cache:
             return self._adapter_cache[cache_key]
 
-        resolved = await self._load_adapter_from_cloud(provider, access_token)
-        self._adapter_cache[cache_key] = resolved
-        return resolved
-
-    async def _load_adapter_from_cloud(self, provider: str, access_token: str | None = None):
-        if not access_token:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                response = await client.get(
-                    f"{self.settings.cloud_api_url}/providers/credential",
-                    params={"provider": provider},
-                    headers={"Authorization": f"Bearer {access_token}"},
-                )
-        except httpx.HTTPError:
-            return None
-
-        if response.status_code != 200:
-            return None
-
-        payload = response.json()
-        secret = str(payload.get("secret", "")).strip()
-        connection_type = str(payload.get("connection_type", ""))
-
-        if not secret:
-            return None
-
-        if connection_type == "oauth":
-            try:
-                parsed = json.loads(secret)
-                if isinstance(parsed, dict):
-                    secret = str(parsed.get("access_token") or parsed.get("authorization_code") or "")
-            except json.JSONDecodeError:
-                pass
-
-        if not secret:
-            return None
-
         if provider == "openrouter":
-            return OpenRouterAdapter(
-                api_key=secret,
+            resolved = OpenRouterAdapter(
+                api_key=api_key,
                 default_model=self.settings.openrouter_model,
                 base_url=self.settings.openrouter_base_url,
             )
-
-        return OpenAIAdapter(
-            api_key=secret,
-            default_model=self.settings.openai_model,
-        )
+        else:
+            resolved = OpenAIAdapter(
+                api_key=api_key,
+                default_model=self.settings.openai_model,
+            )
+        self._adapter_cache[cache_key] = resolved
+        return resolved
 
 
 async def _collect_completion(
@@ -264,13 +212,15 @@ async def _collect_completion(
 def _build_prompts(payload: AITransformRequest) -> tuple[str, str]:
     context_block = _build_note_context_block(payload.note_context)
     if payload.transform == "summarize":
+        summary_format = _summary_format_for(payload.note_context)
         system = (
-            "You are a precise note assistant. Produce a concise, high-signal summary "
-            "with short bullets and no preamble. Start immediately with the summary. "
+            "You are a precise note assistant. Produce concise, high-signal markdown with no preamble. "
+            "Use the requested section structure exactly. Keep headings short and use short bullets. "
             "When source hints are available, preserve who said what."
         )
         user = (
-            "Summarize this note in 4-6 short bullets.\n\n"
+            f"Summarize this note using the `{summary_format['id']}` format.\n"
+            f"{summary_format['instructions']}\n\n"
             f"{context_block}"
             f"Note content:\n{payload.content}"
         )
@@ -301,6 +251,52 @@ def _build_prompts(payload: AITransformRequest) -> tuple[str, str]:
         f"Note content:\n{payload.content}"
     )
     return system, user
+
+
+def _summary_format_for(note_context: NoteAIContext | None) -> dict[str, str]:
+    if note_context and note_context.note_kind == "interview_assist":
+        return {
+            "id": "interview_debrief",
+            "instructions": (
+                "Return markdown with these H2 sections: `## Interview Snapshot`, "
+                "`## Strong Signals`, `## Risks or Follow-Ups`, `## Suggested Next Steps`."
+            ),
+        }
+
+    if note_context and note_context.note_kind == "transcript":
+        if note_context.context_preset == "meeting":
+            return {
+                "id": "meeting_brief",
+                "instructions": (
+                    "Return markdown with these H2 sections: `## Overview`, `## Decisions`, "
+                    "`## Open Questions`, `## Next Steps`."
+                ),
+            }
+        if note_context.context_preset in {"podcast", "youtube"}:
+            return {
+                "id": "research_capture",
+                "instructions": (
+                    "Return markdown with these H2 sections: `## Core Ideas`, `## Supporting Details`, "
+                    "`## Quotes or Signals`, `## Follow-Up Research`."
+                ),
+            }
+
+    if note_context and any("decision" in tag.lower() for tag in note_context.tags):
+        return {
+            "id": "decision_log",
+            "instructions": (
+                "Return markdown with these H2 sections: `## Decision`, `## Why It Matters`, "
+                "`## Tradeoffs`, `## Next Steps`."
+            ),
+        }
+
+    return {
+        "id": "research_capture",
+        "instructions": (
+            "Return markdown with these H2 sections: `## Summary`, `## Key Details`, "
+            "`## Open Questions`, `## Next Steps`."
+        ),
+    }
 
 
 def _build_interview_turn_extraction_prompts(

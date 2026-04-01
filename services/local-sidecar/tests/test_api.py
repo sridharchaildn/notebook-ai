@@ -5,14 +5,22 @@ from app.main import create_app
 from fastapi.testclient import TestClient
 
 
+def _build_test_client(settings: Settings) -> TestClient:
+    settings.settings_profile_path = settings.notes_dir.parent / "user_settings.json"
+    client = TestClient(create_app(settings))
+    client.headers.update({"X-Notebook-Desktop-Token": settings.desktop_token})
+    return client
+
+
 def test_notes_crud_and_provider_status(tmp_path):
     settings = Settings(
         notes_dir=tmp_path / "notes",
         profile_path=tmp_path / "provider_status.json",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     created = client.post(
         "/notes",
@@ -39,13 +47,68 @@ def test_notes_crud_and_provider_status(tmp_path):
     assert updated.json()["frontmatter"]["title"] == "Design Ideas v2"
     assert updated.json()["frontmatter"]["context_preset"] == "custom"
 
-    cached = client.post(
-        "/providers/status/cache",
-        json={"provider": "openai", "via": "oauth", "connected": True},
+    saved = client.post(
+        "/providers/byok",
+        json={"provider": "openai", "api_key": "sk-local-openai"},
     )
-    assert cached.status_code == 200
-    openai_status = [item for item in cached.json() if item["provider"] == "openai"][0]
+    assert saved.status_code == 200
+    openai_status = [item for item in saved.json() if item["provider"] == "openai"][0]
     assert openai_status["connected"] is True
+    assert openai_status["via"] == "api_key"
+    assert openai_status["scope"] == "desktop_local"
+
+
+def test_provider_byok_persists_across_restarts(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
+    )
+    first_client = _build_test_client(settings)
+
+    saved = first_client.post(
+        "/providers/byok",
+        json={"provider": "openrouter", "api_key": "sk-or-local"},
+    )
+    assert saved.status_code == 200
+
+    restarted_client = _build_test_client(settings)
+    listed = restarted_client.get("/providers/status")
+    assert listed.status_code == 200
+    openrouter_status = [item for item in listed.json() if item["provider"] == "openrouter"][0]
+    assert openrouter_status["connected"] is True
+    assert openrouter_status["via"] == "api_key"
+    assert openrouter_status["scope"] == "desktop_local"
+
+
+def test_provider_delete_removes_local_credential(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
+    )
+    client = _build_test_client(settings)
+
+    saved = client.post(
+        "/providers/byok",
+        json={"provider": "openai", "api_key": "sk-local-openai"},
+    )
+    assert saved.status_code == 200
+
+    deleted = client.delete("/providers/openai")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"provider": "openai", "connected": False}
+
+    listed = client.get("/providers/status")
+    assert listed.status_code == 200
+    openai_status = [item for item in listed.json() if item["provider"] == "openai"][0]
+    assert openai_status["connected"] is False
+    assert openai_status["via"] == "none"
+    assert openai_status["scope"] == "none"
 
 
 def test_notes_accept_legacy_body_payloads(tmp_path):
@@ -54,8 +117,9 @@ def test_notes_accept_legacy_body_payloads(tmp_path):
         profile_path=tmp_path / "provider_status.json",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     created = client.post(
         "/notes",
@@ -64,7 +128,7 @@ def test_notes_accept_legacy_body_payloads(tmp_path):
     assert created.status_code == 201
     payload = created.json()
     assert payload["content"] == "Saved via body"
-    assert payload["content_format"] == "plain_text"
+    assert payload["content_format"] == "markdown"
     note_id = payload["frontmatter"]["id"]
 
     updated = client.put(
@@ -81,8 +145,9 @@ def test_stream_transform_sse(tmp_path):
         profile_path=tmp_path / "provider_status.json",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     response = client.post(
         "/ai/transform/stream",
@@ -105,8 +170,9 @@ def test_copilot_chat_stream(tmp_path):
         profile_path=tmp_path / "provider_status.json",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     response = client.post(
         "/ai/copilot/chat/stream",
@@ -138,8 +204,9 @@ def test_interview_turns_and_coach_stream(tmp_path):
         profile_path=tmp_path / "provider_status.json",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     turns_res = client.post(
         "/ai/interview/turns",
@@ -179,8 +246,9 @@ def test_transcription_chunk_returns_structured_error_fields(tmp_path):
         cloud_api_url="http://127.0.0.1:9",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     response = client.post(
         "/transcription/chunk",
@@ -213,8 +281,9 @@ def test_storage_and_folder_endpoints(tmp_path):
         profile_path=tmp_path / "provider_status.json",
         storage_profile_path=tmp_path / "storage_profile.json",
         sync_profile_path=tmp_path / "sync_profile.json",
+        desktop_token="desktop-test-token",
     )
-    client = TestClient(create_app(settings))
+    client = _build_test_client(settings)
 
     root = client.get("/storage/local-root")
     assert root.status_code == 200
@@ -239,3 +308,43 @@ def test_storage_and_folder_endpoints(tmp_path):
     sync_status = client.get("/sync/status")
     assert sync_status.status_code == 200
     assert sync_status.json()["enabled"] is True
+
+
+def test_local_settings_endpoints(tmp_path):
+    settings = Settings(
+        notes_dir=tmp_path / "notes",
+        profile_path=tmp_path / "provider_status.json",
+        storage_profile_path=tmp_path / "storage_profile.json",
+        sync_profile_path=tmp_path / "sync_profile.json",
+        settings_profile_path=tmp_path / "user_settings.json",
+        desktop_token="desktop-test-token",
+    )
+    client = _build_test_client(settings)
+
+    initial_transcription = client.get("/settings/transcription")
+    assert initial_transcription.status_code == 200
+    assert initial_transcription.json()["main_language"] == "auto"
+
+    updated_transcription = client.put(
+        "/settings/transcription",
+        json={
+            "main_language": "en",
+            "spoken_languages": ["English", "Spanish"],
+            "custom_vocabulary": ["Notebook AI", "OpenRouter"],
+        },
+    )
+    assert updated_transcription.status_code == 200
+    assert updated_transcription.json()["main_language"] == "en"
+    assert updated_transcription.json()["spoken_languages"] == ["English", "Spanish"]
+
+    initial_markdown = client.get("/settings/markdown")
+    assert initial_markdown.status_code == 200
+    assert initial_markdown.json()["editor_mode"] == "rich_text"
+
+    updated_markdown = client.put(
+        "/settings/markdown",
+        json={"enable_import": True, "enable_export": False, "editor_mode": "preview"},
+    )
+    assert updated_markdown.status_code == 200
+    assert updated_markdown.json()["enable_export"] is False
+    assert updated_markdown.json()["editor_mode"] == "preview"

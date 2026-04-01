@@ -15,6 +15,7 @@ interface Props {
   statusMessage?: string;
   manualSignInUrl?: string | null;
   magicLinkEmail?: string;
+  buildVersion?: string;
 }
 
 export function SplashScreen({
@@ -32,6 +33,7 @@ export function SplashScreen({
   statusMessage = '',
   manualSignInUrl = null,
   magicLinkEmail = '',
+  buildVersion = '0.1.0',
 }: Props) {
   const signedIn = Boolean(sessionUserId);
 
@@ -146,7 +148,7 @@ export function SplashScreen({
           </div>
         ) : null}
 
-        <p className="splash-version">v0.4.0</p>
+        <p className="splash-version">v{buildVersion}</p>
       </div>
     </div>
   );

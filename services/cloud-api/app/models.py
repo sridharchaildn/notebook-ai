@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 
 ProviderId = Literal["openai", "openrouter"]
 StorageMode = Literal["local", "local_and_drive"]
-LegalDocumentType = Literal["privacy_policy", "user_agreement"]
 WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
 ModelUseCase = Literal["copilot", "transcription"]
 
@@ -53,6 +52,7 @@ class ProviderStatus(BaseModel):
     provider: ProviderId
     connected: bool
     via: Literal["oauth", "api_key", "none"]
+    scope: Literal["desktop_local", "account_vault", "none"] = "none"
     last_updated_at: datetime | None = None
 
 
@@ -74,33 +74,6 @@ class ProviderCredentialResponse(BaseModel):
     provider: ProviderId
     connection_type: Literal["oauth", "api_key"]
     secret: str
-
-
-class LegalDocument(BaseModel):
-    type: LegalDocumentType
-    version: str
-    title: str
-    url: str
-
-
-class LegalCurrentResponse(BaseModel):
-    documents: list[LegalDocument]
-
-
-class LegalAcceptanceInput(BaseModel):
-    type: LegalDocumentType
-    version: str
-
-
-class LegalAcceptRequest(BaseModel):
-    acceptances: list[LegalAcceptanceInput] = Field(default_factory=list)
-
-
-class LegalAcceptanceRecord(BaseModel):
-    type: LegalDocumentType
-    version: str
-    accepted_at: datetime
-
 
 class StoragePreference(BaseModel):
     mode: StorageMode = "local"

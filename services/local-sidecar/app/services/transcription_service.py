@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from ..config import Settings
+from ..provider_status_store import ProviderStatusStore
 
 OPENAI_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -28,11 +29,17 @@ def _build_llm_transcription_prompt(
     context_preset: str | None,
     context_text: str | None,
     source_hint: str | None,
+    main_language: str | None = None,
+    spoken_languages: list[str] | None = None,
+    custom_vocabulary: list[str] | None = None,
 ) -> str:
     extra = _build_transcription_context_lines(
         context_preset=context_preset,
         context_text=context_text,
         source_hint=source_hint,
+        main_language=main_language,
+        spoken_languages=spoken_languages,
+        custom_vocabulary=custom_vocabulary,
     )
     if not extra:
         return TRANSCRIBE_LLM_PROMPT
@@ -44,11 +51,17 @@ def _build_whisper_prompt(
     context_preset: str | None,
     context_text: str | None,
     source_hint: str | None,
+    main_language: str | None = None,
+    spoken_languages: list[str] | None = None,
+    custom_vocabulary: list[str] | None = None,
 ) -> str:
     extra = _build_transcription_context_lines(
         context_preset=context_preset,
         context_text=context_text,
         source_hint=source_hint,
+        main_language=main_language,
+        spoken_languages=spoken_languages,
+        custom_vocabulary=custom_vocabulary,
     )
     if not extra:
         return ""
@@ -60,6 +73,9 @@ def _build_transcription_context_lines(
     context_preset: str | None,
     context_text: str | None,
     source_hint: str | None,
+    main_language: str | None = None,
+    spoken_languages: list[str] | None = None,
+    custom_vocabulary: list[str] | None = None,
 ) -> str:
     lines: list[str] = []
     normalized_preset = (context_preset or "").strip().lower()
@@ -80,6 +96,24 @@ def _build_transcription_context_lines(
 
     if context_text and context_text.strip():
         lines.append(f"User context: {context_text.strip()}")
+
+    normalized_main_language = (main_language or "").strip()
+    if normalized_main_language and normalized_main_language.lower() != "auto":
+        lines.append(f"Primary spoken language: {normalized_main_language}")
+
+    if spoken_languages:
+        normalized_spoken_languages = [item.strip() for item in spoken_languages if item.strip()]
+        if normalized_spoken_languages:
+            lines.append(
+                "Expected spoken languages: " + ", ".join(normalized_spoken_languages[:6])
+            )
+
+    if custom_vocabulary:
+        normalized_vocabulary = [item.strip() for item in custom_vocabulary if item.strip()]
+        if normalized_vocabulary:
+            lines.append(
+                "Prefer these exact terms if heard: " + ", ".join(normalized_vocabulary[:24])
+            )
 
     return " ".join(lines).strip()
 
@@ -104,8 +138,9 @@ class _LLMAudioPrepared:
 
 
 class TranscriptionService:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, provider_store: ProviderStatusStore):
         self.settings = settings
+        self.provider_store = provider_store
 
     async def transcribe_chunk(
         self,
@@ -120,6 +155,9 @@ class TranscriptionService:
         context_preset: str | None = None,
         context_text: str | None = None,
         source_hint: str | None = None,
+        main_language: str | None = None,
+        spoken_languages: list[str] | None = None,
+        custom_vocabulary: list[str] | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         log.debug(
@@ -141,6 +179,9 @@ class TranscriptionService:
                 context_preset=context_preset,
                 context_text=context_text,
                 source_hint=source_hint,
+                main_language=main_language,
+                spoken_languages=spoken_languages,
+                custom_vocabulary=custom_vocabulary,
                 access_token=access_token,
             )
             result.segment_id = segment_id
@@ -155,6 +196,9 @@ class TranscriptionService:
             context_preset=context_preset,
             context_text=context_text,
             source_hint=source_hint,
+            main_language=main_language,
+            spoken_languages=spoken_languages,
+            custom_vocabulary=custom_vocabulary,
             access_token=access_token,
         )
         result.segment_id = segment_id
@@ -171,6 +215,9 @@ class TranscriptionService:
         context_preset: str | None = None,
         context_text: str | None = None,
         source_hint: str | None = None,
+        main_language: str | None = None,
+        spoken_languages: list[str] | None = None,
+        custom_vocabulary: list[str] | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         or_key = await self._resolve_openrouter_api_key(access_token=access_token)
@@ -208,7 +255,7 @@ class TranscriptionService:
         else:
             msg = (
                 "LLM transcription needs an API key: set NOTEBOOK_LOCAL_OPENROUTER_API_KEY and/or "
-                "NOTEBOOK_LOCAL_OPENAI_API_KEY, or store credentials via the desktop (BYOK) with cloud API running."
+                "NOTEBOOK_LOCAL_OPENAI_API_KEY, or save a provider key in desktop Settings."
             )
             log.warning("transcribe_llm: no openrouter or openai key")
             return TranscriptionResult(
@@ -228,7 +275,12 @@ class TranscriptionService:
                 recoverable=False,
             )
 
-        prepared = _prepare_llm_audio_for_openai_input(audio_bytes, filename, content_type)
+        prepared = _prepare_llm_audio_for_openai_input(
+            audio_bytes,
+            filename,
+            content_type,
+            ffmpeg_path=str(self.settings.ffmpeg_path) if self.settings.ffmpeg_path else None,
+        )
         if prepared.error:
             return TranscriptionResult(
                 text="",
@@ -255,6 +307,9 @@ class TranscriptionService:
                                 context_preset=context_preset,
                                 context_text=context_text,
                                 source_hint=source_hint,
+                                main_language=main_language,
+                                spoken_languages=spoken_languages,
+                                custom_vocabulary=custom_vocabulary,
                             ),
                         },
                         {
@@ -380,6 +435,9 @@ class TranscriptionService:
         context_preset: str | None = None,
         context_text: str | None = None,
         source_hint: str | None = None,
+        main_language: str | None = None,
+        spoken_languages: list[str] | None = None,
+        custom_vocabulary: list[str] | None = None,
         access_token: str | None = None,
     ) -> TranscriptionResult:
         if provider != "openai":
@@ -402,9 +460,9 @@ class TranscriptionService:
         if not api_key:
             msg = (
                 "No OpenAI API key: set NOTEBOOK_LOCAL_OPENAI_API_KEY in the sidecar .env or "
-                "save an OpenAI key / complete OpenAI OAuth in the desktop (cloud API must be running)."
+                "save an OpenAI key in desktop Settings. Desktop BYOK is stored locally on this device."
             )
-            log.warning("transcribe_whisper: missing OpenAI API key after local + cloud lookup")
+            log.warning("transcribe_whisper: missing OpenAI API key after local lookup")
             return TranscriptionResult(
                 text="",
                 provider="openai",
@@ -434,7 +492,12 @@ class TranscriptionService:
             context_preset=context_preset,
             context_text=context_text,
             source_hint=source_hint,
+            main_language=main_language,
+            spoken_languages=spoken_languages,
+            custom_vocabulary=custom_vocabulary,
         )
+        whisper_language = (main_language or "").strip()
+        whisper_language = "" if whisper_language.lower() == "auto" else whisper_language
         async with httpx.AsyncClient(timeout=30.0) as client:
             for model in models_to_try:
                 try:
@@ -445,6 +508,7 @@ class TranscriptionService:
                         data={
                             "model": model,
                             **({"prompt": prompt} if prompt else {}),
+                            **({"language": whisper_language} if whisper_language else {}),
                         },
                         files={"file": (filename, audio_bytes, content_type)},
                     )
@@ -501,102 +565,42 @@ class TranscriptionService:
         )
 
     async def _resolve_openai_api_key(self, access_token: str | None = None) -> str | None:
-        local = (self.settings.openai_api_key or "").strip()
+        _ = access_token
+        local = self.provider_store.get_api_key(
+            "openai",
+            self.settings.openai_api_key,
+            self.settings.openrouter_api_key,
+        )
         if local:
             log.debug("OpenAI key source=local_env")
             return local
-
-        if not access_token:
-            return None
-
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                response = await client.get(
-                    f"{self.settings.cloud_api_url}/providers/credential",
-                    params={"provider": "openai"},
-                    headers={"Authorization": f"Bearer {access_token}"},
-                )
-        except httpx.HTTPError as exc:
-            log.debug("cloud openai credential fetch failed: %s", exc)
-            return None
-
-        if response.status_code != 200:
-            log.debug("cloud openai credential: status=%s", response.status_code)
-            return None
-
-        payload = response.json()
-        secret = str(payload.get("secret") or "").strip()
-        if not secret:
-            return None
-
-        connection_type = str(payload.get("connection_type") or "")
-        if connection_type == "oauth":
-            try:
-                parsed = json.loads(secret)
-                if isinstance(parsed, dict):
-                    candidate = str(parsed.get("access_token") or "").strip()
-                    if candidate:
-                        log.debug("OpenAI key source=cloud_oauth")
-                    return candidate or None
-            except json.JSONDecodeError:
-                return None
-
-        log.debug("OpenAI key source=cloud_api_key")
-        return secret
+        return None
 
     async def _resolve_openrouter_api_key(self, access_token: str | None = None) -> str | None:
-        local = (self.settings.openrouter_api_key or "").strip()
+        _ = access_token
+        local = self.provider_store.get_api_key(
+            "openrouter",
+            self.settings.openai_api_key,
+            self.settings.openrouter_api_key,
+        )
         if local:
             log.debug("OpenRouter key source=local_env")
             return local
-
-        if not access_token:
-            return None
-
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                response = await client.get(
-                    f"{self.settings.cloud_api_url}/providers/credential",
-                    params={"provider": "openrouter"},
-                    headers={"Authorization": f"Bearer {access_token}"},
-                )
-        except httpx.HTTPError as exc:
-            log.debug("cloud openrouter credential fetch failed: %s", exc)
-            return None
-
-        if response.status_code != 200:
-            return None
-
-        payload = response.json()
-        secret = str(payload.get("secret") or "").strip()
-        if not secret:
-            return None
-
-        connection_type = str(payload.get("connection_type") or "")
-        if connection_type == "oauth":
-            try:
-                parsed = json.loads(secret)
-                if isinstance(parsed, dict):
-                    candidate = str(parsed.get("access_token") or "").strip()
-                    return candidate or None
-            except json.JSONDecodeError:
-                return None
-
-        log.debug("OpenRouter key source=cloud_api_key")
-        return secret
+        return None
 
 
 def _prepare_llm_audio_for_openai_input(
     audio_bytes: bytes,
     filename: str,
     content_type: str,
+    ffmpeg_path: str | None = None,
 ) -> _LLMAudioPrepared:
     """OpenAI input_audio only allows format wav or mp3; browsers usually emit WebM."""
     fmt = _guess_audio_format(filename, content_type)
     if fmt in {"wav", "mp3"}:
         return _LLMAudioPrepared(data=audio_bytes, api_format=fmt)
 
-    wav = _ffmpeg_transcode_to_wav(audio_bytes)
+    wav = _ffmpeg_transcode_to_wav(audio_bytes, ffmpeg_path=ffmpeg_path)
     if wav is not None:
         log.info(
             "LLM audio: transcoded %s -> wav via ffmpeg (in=%s out=%s)",
@@ -616,14 +620,19 @@ def _prepare_llm_audio_for_openai_input(
     )
 
 
-def _ffmpeg_transcode_to_wav(audio_bytes: bytes) -> bytes | None:
-    if not shutil.which("ffmpeg"):
+def _ffmpeg_transcode_to_wav(audio_bytes: bytes, ffmpeg_path: str | None = None) -> bytes | None:
+    ffmpeg_binary = ffmpeg_path or shutil.which("ffmpeg")
+    if not ffmpeg_binary:
         log.warning("ffmpeg not found on PATH; cannot transcode WebM for LLM transcription")
         return None
+    return _ffmpeg_transcode_to_wav_with_binary(audio_bytes, ffmpeg_binary)
+
+
+def _ffmpeg_transcode_to_wav_with_binary(audio_bytes: bytes, ffmpeg_binary: str) -> bytes | None:
     try:
         result = subprocess.run(
             [
-                "ffmpeg",
+                ffmpeg_binary,
                 "-hide_banner",
                 "-loglevel",
                 "error",

@@ -6,18 +6,14 @@ import { useRouter } from 'next/navigation';
 import { UICard, UIButton } from '@notebook-ai/ui';
 import { AppLogo } from '../../components/AppLogo';
 import { ThemeToggle } from '../../components/ThemeToggle';
-import {
-  errorMessage,
-  fetchLegalAcceptances,
-  fetchLegalDocuments,
-} from '../../../lib/cloud';
+import { errorMessage } from '../../../lib/cloud';
 import { getSupabaseClient, isSupabaseConfigured } from '../../../lib/supabase';
 
 export default function AuthCallbackPage() {
   const router = useRouter();
   const [status, setStatus] = useState('Completing sign in...');
   const [error, setError] = useState('');
-  const [stage, setStage] = useState<'session' | 'legal' | 'done'>('session');
+  const [stage, setStage] = useState<'session' | 'done'>('session');
 
   useEffect(() => {
     void (async () => {
@@ -45,23 +41,6 @@ export default function AuthCallbackPage() {
         } = await supabase.auth.getUser();
         if (userError) throw userError;
         if (!user) throw new Error('No signed-in user found. Please try signing in again.');
-
-        setStage('legal');
-        setStatus('Checking legal acceptance...');
-        const [docs, accepted] = await Promise.all([
-          fetchLegalDocuments(),
-          fetchLegalAcceptances(),
-        ]);
-        const acceptedPairs = new Set(accepted.map((entry) => `${entry.type}:${entry.version}`));
-        const missingDocs = docs.filter((doc) => !acceptedPairs.has(`${doc.type}:${doc.version}`));
-
-        if (missingDocs.length > 0) {
-          const next = new URLSearchParams();
-          if (user.email) next.set('email', user.email);
-          setStatus('Legal acceptance required. Redirecting...');
-          router.replace(`/auth/signup?${next.toString()}`);
-          return;
-        }
 
         setStage('done');
         setStatus('Sign in complete. Redirecting...');
@@ -105,9 +84,7 @@ export default function AuthCallbackPage() {
                 <span className="spinner" />
                 {stage === 'session'
                   ? 'Validating session'
-                  : stage === 'legal'
-                    ? 'Checking legal acceptance'
-                    : 'Done'}
+                  : 'Done'}
               </div>
             </div>
           ) : null}

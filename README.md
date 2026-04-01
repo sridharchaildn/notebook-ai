@@ -2,11 +2,13 @@
 
 Desktop-first AI note taker with a local-first Electron UX, a Next.js web app, and FastAPI/LangChain backends.
 
+Licensed under the [MIT License](./LICENSE).
+
 ## Architecture
 
 Notebook AI is a monorepo:
 - `apps/desktop`: Electron + React + Vite desktop recorder/editor
-- `apps/web`: Next.js landing, signup, legal acceptance, onboarding, and web settings
+- `apps/web`: Next.js landing, signup/signin, onboarding, and web settings
 - `services/local-sidecar`: local FastAPI note/transcript API
 - `services/cloud-api`: hosted FastAPI auth/provider/settings API
 - `packages/contracts`: shared TypeScript API contracts
@@ -30,9 +32,8 @@ flowchart TB
     Providers["Provider APIs<br/>OpenAI · OpenRouter · …"]
     Cloud --> Supabase
   end
-  Web -->|"signup · legal accept · onboarding"| Cloud
-  Desktop -->|"desktop auth exchange · BYOK · OAuth flows"| Cloud
-  Sidecar -->|"API keys when not in sidecar .env"| Cloud
+  Web -->|"signin · onboarding · BYOK"| Cloud
+  Desktop -->|"desktop auth exchange · Drive OAuth flows"| Cloud
   Sidecar -->|"streamed transform · transcription"| Providers
 ```
 
@@ -41,9 +42,14 @@ flowchart TB
 A **sidecar** here is a small **local HTTP service** you run next to the desktop app (not a second cloud). It exists so normal work stays **local-first and low-latency**:
 
 - **Notes:** Create, list, and save markdown through the sidecar so content stays on your filesystem and the UI does not depend on a remote service for every edit.
-- **AI and transcription:** Streaming transforms and audio round-trips go to the sidecar on `localhost`, which talks to provider APIs using keys from your env or from the cloud vault—so you get responsive streaming without routing note bodies or every model call through hosted infrastructure.
+- **AI and transcription:** Streaming transforms and audio round-trips go to the sidecar on `localhost`, which talks to provider APIs using keys from the sidecar `.env` or keys saved locally by the desktop app on that device.
 
-The **cloud API** is a separate companion: Supabase auth validation, session refresh/logout, legal acceptance, provider OAuth/BYOK, storage preferences, desktop auth handoff, and Drive integration metadata. It does **not** store your note markdown or sit in the path for debounced note persistence.
+The **cloud API** is a separate companion: Supabase auth validation, session refresh/logout, web/mobile provider vault storage, storage preferences, desktop auth handoff, and Drive integration metadata. It does **not** store your note markdown or sit in the path for debounced note persistence.
+
+Credential scope is intentionally split:
+- Desktop BYOK is stored locally on the device through `services/local-sidecar` and is not synced to the account vault.
+- Web and future mobile clients store BYOK only in the cloud API's encrypted account vault.
+- Hosted AI routes can use vault credentials server-side, but raw provider secrets do not go back to browser or mobile clients.
 
 ## UX Highlights
 
@@ -80,6 +86,15 @@ See `.env.example` in:
 - `apps/desktop`
 - `apps/web`
 
+## Versioning And Releases
+
+- `VERSION` is the repo-wide source of truth.
+- Run `npm run version:sync` after bumping `VERSION`.
+- Generate release notes with `npm run release:notes -- --version <x.y.z>`.
+- Build the macOS sidecar package with `npm run release:sidecar:mac`.
+- Build the macOS desktop DMG with `npm run release:desktop:mac`.
+- See [docs/releases/PROCESS.md](./docs/releases/PROCESS.md) for branch naming and release cadence.
+
 ## API Surface
 
 - Local sidecar:
@@ -100,13 +115,12 @@ See `.env.example` in:
   - `POST /sync/run`
   - `POST /ai/transform/stream` (SSE)
   - `GET /providers/status`
-  - `POST /providers/status/cache`
+  - `POST /providers/byok`
+  - `GET /providers/models`
+  - `DELETE /providers/{provider}`
 - Cloud API:
   - `POST /auth/session/refresh`
   - `POST /auth/logout`
-  - `GET /legal/current`
-  - `POST /legal/accept`
-  - `GET /legal/accept`
   - `GET /settings/storage`
   - `PUT /settings/storage`
   - `POST /providers/openai/oauth/start`
@@ -115,7 +129,7 @@ See `.env.example` in:
   - `GET /integrations/google-drive/oauth/callback`
   - `GET /integrations/google-drive/status`
   - `POST /integrations/google-drive/access-token`
-  - `POST /providers/byok`
+  - `POST /providers/byok` (web/mobile encrypted account vault)
   - `GET /providers/status`
-  - `GET /providers/credential`
+  - `GET /providers/credential` (server-side use only)
   - `DELETE /providers/{provider}`

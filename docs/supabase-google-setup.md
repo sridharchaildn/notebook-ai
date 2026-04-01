@@ -40,8 +40,7 @@ Run [services/cloud-api/supabase_schema.sql](../services/cloud-api/supabase_sche
 
 That creates the cloud tables used by:
 
-- provider credential storage
-- legal acceptance records
+- web/mobile provider credential storage
 - storage preferences
 
 ## Step 2: Configure Supabase Auth For This App

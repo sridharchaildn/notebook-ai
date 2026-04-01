@@ -1,0 +1,75 @@
+name: cloud-api-deploy
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'VERSION'
+      - 'services/cloud-api/**'
+      - '.github/workflows/cloud-api-deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production-cloud-api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build virtualenv
+        run: |
+          python -m venv services/cloud-api/.venv
+          services/cloud-api/.venv/bin/python -m pip install --upgrade pip
+          services/cloud-api/.venv/bin/python -m pip install -e './services/cloud-api[dev]'
+
+      - name: Run tests
+        run: services/cloud-api/.venv/bin/python -m pytest
+        working-directory: services/cloud-api
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - uses: azure/docker-login@v2
+        with:
+          login-server: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          username: ${{ secrets.AZURE_CONTAINER_REGISTRY_USERNAME }}
+          password: ${{ secrets.AZURE_CONTAINER_REGISTRY_PASSWORD }}
+
+      - id: build_version
+        name: Compute build version
+        run: echo "value=$(cat VERSION)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        env:
+          IMAGE_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY }}/notebook-ai-cloud-api:${{ github.sha }}
+        run: |
+          docker build -f services/cloud-api/Dockerfile -t "$IMAGE_NAME" .
+          docker push "$IMAGE_NAME"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
+
+      - name: Deploy to Azure Container Apps
+        run: |
+          az containerapp update \
+            --name "${{ secrets.AZURE_CONTAINER_APP_NAME }}" \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --image "$IMAGE_NAME" \
+            --set-env-vars \
+              NOTEBOOK_CLOUD_BUILD_VERSION="${{ steps.build_version.outputs.value }}" \
+              NOTEBOOK_CLOUD_ALLOWED_ORIGINS="${{ secrets.NOTEBOOK_CLOUD_ALLOWED_ORIGINS }}" \
+              NOTEBOOK_CLOUD_CREDENTIAL_SECRET="${{ secrets.NOTEBOOK_CLOUD_CREDENTIAL_SECRET }}" \
+              NOTEBOOK_CLOUD_SUPABASE_URL="${{ secrets.NOTEBOOK_CLOUD_SUPABASE_URL }}" \
+              NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY="${{ secrets.NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY }}" \
+              NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET="${{ secrets.NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET }}" \
+              NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_ID="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_ID }}" \
+              NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_SECRET="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_SECRET }}" \
+              NOTEBOOK_CLOUD_OPENAI_OAUTH_TOKEN_URL="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_TOKEN_URL }}" \
+              NOTEBOOK_CLOUD_OPENAI_OAUTH_REDIRECT_URI="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_REDIRECT_URI }}" \
+              NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_ID="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_ID }}" \
+              NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_SECRET="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_SECRET }}" \
+              NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_TOKEN_URL="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_TOKEN_URL }}" \
+              NOTEBOOK_CLOUD_GOOGLE_DRIVE_REDIRECT_URI="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_REDIRECT_URI }}"

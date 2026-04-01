@@ -1,0 +1,86 @@
+name: desktop-release
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'VERSION'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'apps/desktop/**'
+      - 'packages/**'
+      - 'services/local-sidecar/**'
+      - 'scripts/release/**'
+      - '.github/workflows/desktop-release.yml'
+
+jobs:
+  package:
+    runs-on: macos-14
+    environment: production-desktop
+    env:
+      VITE_CLOUD_API_URL: ${{ secrets.DESKTOP_CLOUD_API_URL }}
+      VITE_SUPABASE_URL: ${{ secrets.DESKTOP_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.DESKTOP_SUPABASE_ANON_KEY }}
+      VITE_DESKTOP_AUTH_CALLBACK_URL: ${{ secrets.DESKTOP_AUTH_CALLBACK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Run desktop tests
+        run: npm run test:desktop
+
+      - name: Build local-sidecar virtualenv
+        run: |
+          python -m venv services/local-sidecar/.venv
+          services/local-sidecar/.venv/bin/python -m pip install --upgrade pip
+          services/local-sidecar/.venv/bin/python -m pip install -e './services/local-sidecar[dev]' pyinstaller
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - id: ffmpeg
+        name: Resolve ffmpeg path
+        run: echo "path=$(which ffmpeg)" >> "$GITHUB_OUTPUT"
+
+      - id: build_version
+        name: Compute build version
+        run: echo "value=$(cat VERSION)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Package local sidecar resources
+        run: bash scripts/release/build-local-sidecar-macos.sh
+        env:
+          FFMPEG_BINARY: ${{ steps.ffmpeg.outputs.path }}
+
+      - name: Import Apple signing certificate
+        if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Build DMG
+        run: bash scripts/release/package-desktop-macos.sh
+        env:
+          NOTEBOOK_BUILD_VERSION: ${{ steps.build_version.outputs.value }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_NAME: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-dmg
+          path: apps/desktop/release/*.dmg
+          if-no-files-found: error

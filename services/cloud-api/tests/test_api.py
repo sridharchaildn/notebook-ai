@@ -18,10 +18,11 @@ def _build_test_app(
     settings = Settings(
         credential_secret="vault-secret",
         openai_oauth_client_id="client-test",
-        openai_oauth_token_url=None,
-        google_drive_oauth_token_url=None,
-        google_drive_client_id=None,
-        google_drive_client_secret=None,
+        openai_oauth_client_secret="openai-secret-test",
+        openai_oauth_token_url="https://auth.openai.com/oauth/token",
+        google_drive_oauth_token_url="https://oauth2.googleapis.com/token",
+        google_drive_client_id="drive-client-test",
+        google_drive_client_secret="drive-secret-test",
     )
     store = MemoryStore()
     user = AuthenticatedUser(id="user-a", email="user@example.com")
@@ -65,10 +66,16 @@ def test_byok_store_status_and_delete():
     openai = [item for item in statuses if item["provider"] == "openai"][0]
     assert openai["connected"] is True
     assert openai["via"] == "api_key"
+    assert openai["scope"] == "account_vault"
 
     listed = client.get("/providers/status", headers=_auth_headers(session))
     assert listed.status_code == 200
-    assert any(item["provider"] == "openai" and item["connected"] for item in listed.json())
+    assert any(
+        item["provider"] == "openai"
+        and item["connected"]
+        and item["scope"] == "account_vault"
+        for item in listed.json()
+    )
 
     credential = client.get(
         "/providers/credential",
@@ -84,7 +91,14 @@ def test_byok_store_status_and_delete():
 
 
 def test_oauth_start_and_callback_flow():
-    client, store, _auth, session = _build_test_app()
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://auth.openai.com/oauth/token")
+        return httpx.Response(
+            200,
+            json={"access_token": "oauth-access-token", "refresh_token": "oauth-refresh-token"},
+        )
+
+    client, store, _auth, session = _build_test_app(provider_transport=httpx.MockTransport(handler))
 
     redirect = client.post(
         "/providers/openai/oauth/start",
@@ -108,7 +122,7 @@ def test_oauth_start_and_callback_flow():
     assert record is not None
     assert record.connection_type == "oauth"
     decrypted = decrypt_secret(record.encrypted_value, "vault-secret")
-    assert "code-abc" in decrypted
+    assert "oauth-access-token" in decrypted
 
 
 def test_auth_refresh_and_logout():
@@ -129,26 +143,15 @@ def test_auth_refresh_and_logout():
     assert after.status_code == 401
 
 
-def test_legal_storage_and_drive_status():
-    client, _store, _auth, session = _build_test_app()
+def test_storage_and_drive_status():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://oauth2.googleapis.com/token")
+        return httpx.Response(
+            200,
+            json={"access_token": "drive-access-token", "refresh_token": "drive-refresh-token"},
+        )
 
-    legal_current = client.get("/legal/current")
-    assert legal_current.status_code == 200
-    docs = legal_current.json()["documents"]
-    assert len(docs) == 2
-
-    accepted = client.post(
-        "/legal/accept",
-        headers=_auth_headers(session),
-        json={
-            "acceptances": [
-                {"type": "privacy_policy", "version": docs[0]["version"]},
-                {"type": "user_agreement", "version": docs[1]["version"]},
-            ],
-        },
-    )
-    assert accepted.status_code == 200
-    assert len(accepted.json()) == 2
+    client, _store, _auth, session = _build_test_app(provider_transport=httpx.MockTransport(handler))
 
     pref = client.put(
         "/settings/storage",
@@ -181,6 +184,7 @@ def test_legal_storage_and_drive_status():
 
     drive_token = client.post("/integrations/google-drive/access-token", headers=_auth_headers(session))
     assert drive_token.status_code == 200
+    assert drive_token.json()["access_token"] == "drive-access-token"
     assert drive_token.json()["folder_id"] == "folder-2"
     assert drive_token.json()["folder_name"] == "Notebook Mirror"
 

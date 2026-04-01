@@ -7,10 +7,19 @@ interface DesktopRendererSession {
   userEmail: string | null;
 }
 
+interface DesktopAppInfo {
+  version: string;
+  buildVersion: string;
+  isPackaged: boolean;
+  platform: string;
+}
+
 declare global {
   interface Window {
     notebookDesktop: {
       openExternal: (url: string) => Promise<void>;
+      getAppInfo: () => Promise<DesktopAppInfo>;
+      getLocalApiToken: () => Promise<string>;
       chooseDirectory: () => Promise<string | null>;
       consumeAuthCallback: () => Promise<string | null>;
       getAuthSession: () => Promise<DesktopRendererSession | null>;

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import httpx
 
 from .config import Settings
-from .models import LegalAcceptanceRecord, ProviderStatus, StoragePreference
+from .models import ProviderStatus, StoragePreference
 
 
 def _utcnow() -> datetime:
@@ -68,16 +68,6 @@ class CloudStore:
         raise NotImplementedError
 
     async def get_storage_preference(self, user_id: str) -> StoragePreference:
-        raise NotImplementedError
-
-    async def save_legal_acceptances(
-        self,
-        user_id: str,
-        acceptances: list[tuple[str, str]],
-    ) -> list[LegalAcceptanceRecord]:
-        raise NotImplementedError
-
-    async def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
         raise NotImplementedError
 
 
@@ -176,7 +166,13 @@ class SupabaseStore(CloudStore):
             row = provider_rows.get(provider)
             if not row:
                 statuses.append(
-                    ProviderStatus(provider=provider, connected=False, via="none", last_updated_at=None)
+                    ProviderStatus(
+                        provider=provider,
+                        connected=False,
+                        via="none",
+                        scope="none",
+                        last_updated_at=None,
+                    )
                 )
                 continue
 
@@ -186,6 +182,7 @@ class SupabaseStore(CloudStore):
                     provider=provider,
                     connected=True,
                     via=connection_type if connection_type in {"oauth", "api_key"} else "none",
+                    scope="account_vault",
                     last_updated_at=_parse_datetime(str(row.get("updated_at") or "")),
                 )
             )
@@ -272,54 +269,11 @@ class SupabaseStore(CloudStore):
             updated_at=_parse_datetime(str(row.get("updated_at") or "")),
         )
 
-    async def save_legal_acceptances(
-        self,
-        user_id: str,
-        acceptances: list[tuple[str, str]],
-    ) -> list[LegalAcceptanceRecord]:
-        accepted_at = _utcnow().isoformat()
-        rows = [
-            {
-                "user_id": user_id,
-                "doc_type": doc_type,
-                "version": version,
-                "accepted_at": accepted_at,
-            }
-            for doc_type, version in acceptances
-        ]
-        await self._request(
-            "POST",
-            "legal_acceptances",
-            json_body=rows,
-            prefer="resolution=merge-duplicates,return=representation",
-        )
-        return await self.list_legal_acceptances(user_id)
-
-    async def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
-        rows = await self._select_rows(
-            "legal_acceptances",
-            params={
-                "user_id": f"eq.{user_id}",
-                "select": "doc_type,version,accepted_at",
-                "order": "accepted_at.desc",
-            },
-        )
-        return [
-            LegalAcceptanceRecord(
-                type=str(row["doc_type"]),
-                version=str(row["version"]),
-                accepted_at=_parse_datetime(str(row.get("accepted_at") or "")) or _utcnow(),
-            )
-            for row in rows
-        ]
-
-
 @dataclass
 class MemoryStore(CloudStore):
     credentials: dict[tuple[str, str], CredentialRecord] = field(default_factory=dict)
     oauth_states: dict[str, str] = field(default_factory=dict)
     storage_preferences: dict[str, StoragePreference] = field(default_factory=dict)
-    legal_acceptances: dict[tuple[str, str, str], LegalAcceptanceRecord] = field(default_factory=dict)
 
     async def upsert_credential(
         self,
@@ -346,7 +300,13 @@ class MemoryStore(CloudStore):
             record = self.credentials.get((user_id, provider))
             if not record:
                 statuses.append(
-                    ProviderStatus(provider=provider, connected=False, via="none", last_updated_at=None)
+                    ProviderStatus(
+                        provider=provider,
+                        connected=False,
+                        via="none",
+                        scope="none",
+                        last_updated_at=None,
+                    )
                 )
                 continue
             statuses.append(
@@ -354,6 +314,7 @@ class MemoryStore(CloudStore):
                     provider=provider,
                     connected=True,
                     via=record.connection_type if record.connection_type in {"oauth", "api_key"} else "none",
+                    scope="account_vault",
                     last_updated_at=_parse_datetime(record.updated_at),
                 )
             )
@@ -380,25 +341,3 @@ class MemoryStore(CloudStore):
 
     async def get_storage_preference(self, user_id: str) -> StoragePreference:
         return self.storage_preferences.get(user_id, StoragePreference(mode="local", local_root=None, updated_at=None))
-
-    async def save_legal_acceptances(
-        self,
-        user_id: str,
-        acceptances: list[tuple[str, str]],
-    ) -> list[LegalAcceptanceRecord]:
-        now = _utcnow()
-        for doc_type, version in acceptances:
-            self.legal_acceptances[(user_id, doc_type, version)] = LegalAcceptanceRecord(
-                type=doc_type,
-                version=version,
-                accepted_at=now,
-            )
-        return await self.list_legal_acceptances(user_id)
-
-    async def list_legal_acceptances(self, user_id: str) -> list[LegalAcceptanceRecord]:
-        records = [
-            record
-            for (record_user_id, _doc_type, _version), record in self.legal_acceptances.items()
-            if record_user_id == user_id
-        ]
-        return sorted(records, key=lambda record: record.accepted_at, reverse=True)

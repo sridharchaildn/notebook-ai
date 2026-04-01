@@ -1,6 +1,5 @@
 export type ProviderId = 'openai' | 'openrouter';
 export type StorageMode = 'local' | 'local_and_drive';
-export type LegalDocumentType = 'privacy_policy' | 'user_agreement';
 export type ThemePreference = 'light' | 'dark' | 'system';
 export type ThemeTokensVersion = 'v1';
 export type WorkspaceKind = 'desktop_local_only' | 'drive_shared';
@@ -11,6 +10,8 @@ export type SourceHint = 'me' | 'other_audio' | 'unknown';
 export type SyncState = 'idle' | 'syncing' | 'needs_setup' | 'error';
 export type SyncPhase = 'idle' | 'preparing' | 'pulling' | 'merging' | 'pushing' | 'finalizing';
 export type ModelUseCase = 'copilot' | 'transcription';
+export type MarkdownEditorMode = 'rich_text' | 'preview';
+export type ProviderCredentialScope = 'desktop_local' | 'account_vault' | 'none';
 
 export interface NoteFrontmatter {
   id: string;
@@ -29,6 +30,7 @@ export interface ProviderConnection {
   provider: ProviderId;
   connected: boolean;
   via: 'oauth' | 'api_key' | 'none';
+  scope: ProviderCredentialScope;
   last_updated_at?: string;
 }
 
@@ -53,6 +55,20 @@ export interface ProviderModel {
 export interface StoragePreference {
   mode: StorageMode;
   local_root?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TranscriptionPreferences {
+  main_language: string;
+  spoken_languages: string[];
+  custom_vocabulary: string[];
+  updated_at?: string | null;
+}
+
+export interface MarkdownSettings {
+  enable_import: boolean;
+  enable_export: boolean;
+  editor_mode: MarkdownEditorMode;
   updated_at?: string | null;
 }
 
@@ -258,19 +274,6 @@ export interface GoogleDriveTokenResponse {
 export interface GoogleDriveFolderUpdateRequest {
   folder_id: string;
   folder_name?: string | null;
-}
-
-export interface LegalDocument {
-  type: LegalDocumentType;
-  version: string;
-  title: string;
-  url: string;
-}
-
-export interface LegalAcceptanceRecord {
-  type: LegalDocumentType;
-  version: string;
-  accepted_at: string;
 }
 
 export interface AuthenticatedUser {
