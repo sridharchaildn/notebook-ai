@@ -6,6 +6,6 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "dependencies": {
-    "@notebook-ai/contracts": "0.1.0"
+    "@notebook-ai/contracts": "file:../contracts"
   }
 }

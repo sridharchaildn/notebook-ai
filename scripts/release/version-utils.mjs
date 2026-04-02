@@ -27,6 +27,8 @@ export function replaceVersionInJsonFile(filePath, version, dependencyPrefix = '
     if (!deps || typeof deps !== 'object') continue;
     for (const [name, currentValue] of Object.entries(deps)) {
       if (!name.startsWith(dependencyPrefix) || typeof currentValue !== 'string') continue;
+      // Keep workspace/file links intact for local monorepo installs.
+      if (currentValue.startsWith('file:') || currentValue.startsWith('workspace:')) continue;
       deps[name] = version;
     }
   }
