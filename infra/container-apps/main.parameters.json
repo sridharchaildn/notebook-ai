@@ -1,0 +1,90 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": {
+      "value": "notebook-ai"
+    },
+    "acrSku": {
+      "value": "Basic"
+    },
+    "imageRepository": {
+      "value": "notebook-ai-cloud-api"
+    },
+    "imageTag": {
+      "value": "latest"
+    },
+    "deployContainerApp": {
+      "value": false
+    },
+    "containerPort": {
+      "value": 8790
+    },
+    "supabaseUrl": {
+      "value": "https://your-project-ref.supabase.co"
+    },
+    "supabaseSecretKey": {
+      "value": "REPLACE_WITH_SUPABASE_SECRET_KEY"
+    },
+    "credentialSecret": {
+      "value": "REPLACE_WITH_CREDENTIAL_SECRET"
+    },
+    "allowedOrigins": {
+      "value": "https://your-web-app.example.com"
+    },
+    "buildVersion": {
+      "value": ""
+    },
+    "supabaseJwtSecret": {
+      "value": ""
+    },
+    "openaiOauthClientId": {
+      "value": ""
+    },
+    "openaiOauthClientSecret": {
+      "value": ""
+    },
+    "openaiOauthTokenUrl": {
+      "value": ""
+    },
+    "openaiOauthRedirectUri": {
+      "value": ""
+    },
+    "googleDriveClientId": {
+      "value": ""
+    },
+    "googleDriveClientSecret": {
+      "value": ""
+    },
+    "googleDriveOauthTokenUrl": {
+      "value": ""
+    },
+    "googleDriveRedirectUri": {
+      "value": ""
+    },
+    "supabaseAnonKey": {
+      "value": ""
+    },
+    "supabaseJwksUrl": {
+      "value": ""
+    },
+    "openaiOauthAuthorizeUrl": {
+      "value": ""
+    },
+    "openaiOauthScope": {
+      "value": ""
+    },
+    "googleDriveOauthAuthorizeUrl": {
+      "value": ""
+    },
+    "googleDriveScope": {
+      "value": ""
+    },
+    "googleDriveDefaultFolderName": {
+      "value": ""
+    },
+    "notebookCloudDebug": {
+      "value": false
+    }
+  }
+}

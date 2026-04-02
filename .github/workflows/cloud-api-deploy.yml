@@ -1,3 +1,28 @@
+# Deploy cloud-api: tests → Azure OIDC login → Bicep (ACR + Container Apps) + az acr build.
+# Same flow as infra/container-apps/deploy-cloud-api.sh (local deploy).
+#
+# Azure: Entra app registration + Federated credential (GitHub Actions) on that app; assign the app
+# Contributor (or equivalent) on resource group AZURE_RESOURCE_GROUP. No client secret.
+#
+# Required GitHub secrets (repo or environment production-cloud-api):
+#   Azure auth (OIDC):
+#     AZURE_CLIENT_ID              — App registration Application (client) ID
+#     AZURE_TENANT_ID              — Directory (tenant) ID
+#     AZURE_SUBSCRIPTION_ID        — Subscription containing the resource group
+#     AZURE_RESOURCE_GROUP         — e.g. notebook-ai
+#   Cloud API:
+#     NOTEBOOK_CLOUD_SUPABASE_URL
+#     NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY
+#     NOTEBOOK_CLOUD_CREDENTIAL_SECRET
+#     NOTEBOOK_CLOUD_ALLOWED_ORIGINS   — comma-separated CORS origins
+#
+# Optional secrets:
+#   NAME_PREFIX                  — defaults to notebook-ai (must match existing Bicep deployment)
+#   NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET, NOTEBOOK_CLOUD_SUPABASE_ANON_KEY, NOTEBOOK_CLOUD_SUPABASE_JWKS_URL
+#   NOTEBOOK_CLOUD_OPENAI_OAUTH_* (client id/secret, token URL, redirect, authorize URL, scope)
+#   NOTEBOOK_CLOUD_GOOGLE_DRIVE_* (client id/secret, token URL, redirect, authorize URL, scope, default folder)
+#   NOTEBOOK_CLOUD_DEBUG         — true or 1 for verbose logs
+
 name: cloud-api-deploy
 
 on:
@@ -7,7 +32,16 @@ on:
     paths:
       - 'VERSION'
       - 'services/cloud-api/**'
+      - 'infra/container-apps/**'
       - '.github/workflows/cloud-api-deploy.yml'
+
+concurrency:
+  group: cloud-api-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
@@ -32,44 +66,40 @@ jobs:
 
       - uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - uses: azure/docker-login@v2
-        with:
-          login-server: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
-          username: ${{ secrets.AZURE_CONTAINER_REGISTRY_USERNAME }}
-          password: ${{ secrets.AZURE_CONTAINER_REGISTRY_PASSWORD }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - id: build_version
         name: Compute build version
         run: echo "value=$(cat VERSION)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push image
+      - name: Deploy cloud-api (Bicep + ACR build)
         env:
-          IMAGE_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY }}/notebook-ai-cloud-api:${{ github.sha }}
-        run: |
-          docker build -f services/cloud-api/Dockerfile -t "$IMAGE_NAME" .
-          docker push "$IMAGE_NAME"
-          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
-
-      - name: Deploy to Azure Container Apps
-        run: |
-          az containerapp update \
-            --name "${{ secrets.AZURE_CONTAINER_APP_NAME }}" \
-            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-            --image "$IMAGE_NAME" \
-            --set-env-vars \
-              NOTEBOOK_CLOUD_BUILD_VERSION="${{ steps.build_version.outputs.value }}" \
-              NOTEBOOK_CLOUD_ALLOWED_ORIGINS="${{ secrets.NOTEBOOK_CLOUD_ALLOWED_ORIGINS }}" \
-              NOTEBOOK_CLOUD_CREDENTIAL_SECRET="${{ secrets.NOTEBOOK_CLOUD_CREDENTIAL_SECRET }}" \
-              NOTEBOOK_CLOUD_SUPABASE_URL="${{ secrets.NOTEBOOK_CLOUD_SUPABASE_URL }}" \
-              NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY="${{ secrets.NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY }}" \
-              NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET="${{ secrets.NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET }}" \
-              NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_ID="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_ID }}" \
-              NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_SECRET="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_SECRET }}" \
-              NOTEBOOK_CLOUD_OPENAI_OAUTH_TOKEN_URL="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_TOKEN_URL }}" \
-              NOTEBOOK_CLOUD_OPENAI_OAUTH_REDIRECT_URI="${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_REDIRECT_URI }}" \
-              NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_ID="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_ID }}" \
-              NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_SECRET="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_SECRET }}" \
-              NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_TOKEN_URL="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_TOKEN_URL }}" \
-              NOTEBOOK_CLOUD_GOOGLE_DRIVE_REDIRECT_URI="${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_REDIRECT_URI }}"
+          AZ_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZ_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          NAME_PREFIX: ${{ secrets.NAME_PREFIX }}
+          IMAGE_TAG: ${{ github.sha }}
+          NOTEBOOK_CLOUD_BUILD_VERSION: ${{ steps.build_version.outputs.value }}
+          NOTEBOOK_CLOUD_SUPABASE_URL: ${{ secrets.NOTEBOOK_CLOUD_SUPABASE_URL }}
+          NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY: ${{ secrets.NOTEBOOK_CLOUD_SUPABASE_SECRET_KEY }}
+          NOTEBOOK_CLOUD_CREDENTIAL_SECRET: ${{ secrets.NOTEBOOK_CLOUD_CREDENTIAL_SECRET }}
+          NOTEBOOK_CLOUD_ALLOWED_ORIGINS: ${{ secrets.NOTEBOOK_CLOUD_ALLOWED_ORIGINS }}
+          NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET: ${{ secrets.NOTEBOOK_CLOUD_SUPABASE_JWT_SECRET }}
+          NOTEBOOK_CLOUD_SUPABASE_ANON_KEY: ${{ secrets.NOTEBOOK_CLOUD_SUPABASE_ANON_KEY }}
+          NOTEBOOK_CLOUD_SUPABASE_JWKS_URL: ${{ secrets.NOTEBOOK_CLOUD_SUPABASE_JWKS_URL }}
+          NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_ID: ${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_ID }}
+          NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_SECRET: ${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_CLIENT_SECRET }}
+          NOTEBOOK_CLOUD_OPENAI_OAUTH_TOKEN_URL: ${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_TOKEN_URL }}
+          NOTEBOOK_CLOUD_OPENAI_OAUTH_REDIRECT_URI: ${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_REDIRECT_URI }}
+          NOTEBOOK_CLOUD_OPENAI_OAUTH_AUTHORIZE_URL: ${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_AUTHORIZE_URL }}
+          NOTEBOOK_CLOUD_OPENAI_OAUTH_SCOPE: ${{ secrets.NOTEBOOK_CLOUD_OPENAI_OAUTH_SCOPE }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_ID: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_ID }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_SECRET: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_CLIENT_SECRET }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_TOKEN_URL: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_TOKEN_URL }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_REDIRECT_URI: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_REDIRECT_URI }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_AUTHORIZE_URL: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_OAUTH_AUTHORIZE_URL }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_SCOPE: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_SCOPE }}
+          NOTEBOOK_CLOUD_GOOGLE_DRIVE_DEFAULT_FOLDER_NAME: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_DEFAULT_FOLDER_NAME }}
+          NOTEBOOK_CLOUD_DEBUG: ${{ secrets.NOTEBOOK_CLOUD_DEBUG }}
+        run: bash ./infra/container-apps/deploy-cloud-api.sh
