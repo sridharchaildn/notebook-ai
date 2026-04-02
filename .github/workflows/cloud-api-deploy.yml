@@ -61,8 +61,8 @@ jobs:
           services/cloud-api/.venv/bin/python -m pip install -e './services/cloud-api[dev]'
 
       - name: Run tests
-        run: services/cloud-api/.venv/bin/python -m pytest
         working-directory: services/cloud-api
+        run: .venv/bin/python -m pytest
 
       - uses: azure/login@v2
         with:

@@ -23,6 +23,9 @@ jobs:
       VITE_SUPABASE_URL: ${{ secrets.DESKTOP_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.DESKTOP_SUPABASE_ANON_KEY }}
       VITE_DESKTOP_AUTH_CALLBACK_URL: ${{ secrets.DESKTOP_AUTH_CALLBACK_URL }}
+      # secrets cannot be referenced in step `if:`; use env flags instead
+      APPLE_SIGNING_READY: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+      APPLE_NOTARY_API_READY: ${{ secrets.APPLE_API_KEY_P8_BASE64 != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +67,7 @@ jobs:
           FFMPEG_BINARY: ${{ steps.ffmpeg.outputs.path }}
 
       - name: Import Apple signing certificate
-        if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+        if: ${{ env.APPLE_SIGNING_READY == 'true' }}
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
@@ -72,7 +75,7 @@ jobs:
 
       - id: notarization_api_key
         name: Prepare App Store Connect API key
-        if: ${{ secrets.APPLE_API_KEY_P8_BASE64 != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' }}
+        if: ${{ env.APPLE_NOTARY_API_READY == 'true' }}
         run: |
           KEY_PATH="$RUNNER_TEMP/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8"
           echo "${{ secrets.APPLE_API_KEY_P8_BASE64 }}" | base64 --decode > "$KEY_PATH"
