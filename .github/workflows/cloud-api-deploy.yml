@@ -4,7 +4,10 @@
 # Azure: Entra app registration + Federated credential (GitHub Actions) on that app; assign the app
 # Contributor (or equivalent) on resource group AZURE_RESOURCE_GROUP. No client secret.
 #
-# Required GitHub secrets (repo or environment production-cloud-api):
+# Federated credential Subject (branch-based push to master), e.g.:
+#   repo:<owner>/<repo>:ref:refs/heads/master
+#
+# Required GitHub repository secrets:
 #   Azure auth (OIDC):
 #     AZURE_CLIENT_ID              — App registration Application (client) ID
 #     AZURE_TENANT_ID              — Directory (tenant) ID
@@ -46,7 +49,6 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production-cloud-api
     steps:
       - uses: actions/checkout@v4
 

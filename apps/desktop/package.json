@@ -2,13 +2,16 @@
   "name": "@notebook-ai/desktop",
   "version": "0.1.0",
   "private": true,
+  "description": "Notebook AI desktop app (Electron)",
+  "author": "Notebook AI",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "package:mac": "electron-builder --config electron-builder.mjs --mac dmg"
   },
   "dependencies": {
     "@tiptap/extension-link": "^2.11.5",
@@ -38,7 +41,8 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^34.2.0",
+    "electron": "34.5.8",
+    "electron-builder": "^26.8.1",
     "typescript": "^5.7.3",
     "vite": "^6.1.1",
     "vite-plugin-electron": "^0.29.0",
