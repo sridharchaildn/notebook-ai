@@ -9,13 +9,8 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
-    "@notebook-ai/app-core": "file:../../packages/app-core",
-    "@notebook-ai/contracts": "file:../../packages/contracts",
-    "@notebook-ai/server-ai": "file:../../packages/server-ai",
-    "@notebook-ai/theme": "file:../../packages/theme",
-    "@notebook-ai/ui": "file:../../packages/ui",
     "@supabase/supabase-js": "^2.58.0",
-    "next": "14.2.25",
+    "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

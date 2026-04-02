@@ -14,9 +14,24 @@ const contentSecurityPolicy = [
   "form-action 'self'",
 ].join('; ');
 
+const repoRoot = path.join(process.cwd(), '../..');
+
 const nextConfig = {
-  outputFileTracingRoot: path.join(process.cwd(), '../..'),
-  transpilePackages: ['@notebook-ai/ui', '@notebook-ai/theme', '@notebook-ai/contracts'],
+  experimental: {
+    externalDir: true,
+    outputFileTracingRoot: repoRoot,
+  },
+  webpack(config) {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@notebook-ai/contracts$': path.join(repoRoot, 'packages/contracts/src/index.ts'),
+      '@notebook-ai/server-ai$': path.join(repoRoot, 'packages/server-ai/src/index.ts'),
+      '@notebook-ai/ui$': path.join(repoRoot, 'packages/ui/src/index.tsx'),
+      '@notebook-ai/theme': path.join(repoRoot, 'packages/theme'),
+      '@notebook-ai/ui': path.join(repoRoot, 'packages/ui'),
+    };
+    return config;
+  },
   async headers() {
     if (process.env.NODE_ENV !== 'production') {
       return [];

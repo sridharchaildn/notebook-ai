@@ -1,11 +1,9 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { generateObject, streamText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { z } from 'zod';
+import providerCapabilitiesDocument from '../../../specs/provider-capabilities.json';
 import type {
   AITransformRequest,
   InterviewCoachRequest,
@@ -17,9 +15,6 @@ import type {
   TranscriptionChunkResponse,
 } from '@notebook-ai/contracts';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, '../../..');
-const specsDir = path.join(repoRoot, 'specs');
 const cloudApiUrl = process.env.NEXT_PUBLIC_CLOUD_API_URL ?? process.env.CLOUD_API_URL ?? 'http://127.0.0.1:8790';
 const defaultOpenRouterBaseUrl = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1';
 
@@ -42,9 +37,7 @@ function sha(value: string): string {
 
 export async function loadProviderCapabilities(): Promise<ProviderCapability[]> {
   if (capabilityCache) return capabilityCache;
-  const raw = await readFile(path.join(specsDir, 'provider-capabilities.json'), 'utf-8');
-  const parsed = JSON.parse(raw) as { providers: ProviderCapability[] };
-  capabilityCache = parsed.providers;
+  capabilityCache = providerCapabilitiesDocument.providers as ProviderCapability[];
   return capabilityCache;
 }
 
