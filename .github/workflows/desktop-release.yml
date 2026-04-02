@@ -15,6 +15,10 @@ on:
       - 'scripts/release/**'
       - '.github/workflows/desktop-release.yml'
 
+# electron-builder publish → GitHub Releases needs contents write (default token is often read-only)
+permissions:
+  contents: write
+
 jobs:
   package:
     runs-on: macos-14

@@ -210,12 +210,33 @@ if [[ -z "$ACR_NAME" ]]; then
 fi
 
 echo "Resolved ACR: $ACR_NAME"
-echo "Step 2/3: Building and pushing image to ACR (repo root context)..."
+ACR_LOGIN_SERVER="$(
+  az acr show \
+    --subscription "$AZ_SUBSCRIPTION_ID" \
+    --name "$ACR_NAME" \
+    --query loginServer \
+    -o tsv
+)"
+if [[ -z "$ACR_LOGIN_SERVER" ]]; then
+  echo "Failed to resolve ACR login server." >&2
+  exit 1
+fi
+
+echo "Step 2/3a: Importing base image into ACR (avoids Docker Hub anonymous rate limit on acr build)..."
+az acr import \
+  --subscription "$AZ_SUBSCRIPTION_ID" \
+  --name "$ACR_NAME" \
+  --source docker.io/library/python:3.11-slim \
+  --image python:3.11-slim \
+  --force
+
+echo "Step 2/3b: Building and pushing app image (repo root context)..."
 az acr build \
   --subscription "$AZ_SUBSCRIPTION_ID" \
   --registry "$ACR_NAME" \
   --image "${IMAGE_REPOSITORY}:${IMAGE_TAG}" \
   --file "$DOCKERFILE" \
+  --build-arg "REGISTRY_PREFIX=${ACR_LOGIN_SERVER}/" \
   "$ROOT_DIR"
 
 echo "Step 3/3: Deploying Container App revision..."

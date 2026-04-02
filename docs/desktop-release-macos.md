@@ -213,7 +213,11 @@ Local-only variables (e.g. `VITE_LOCAL_API_URL` in `.env`) are for dev; they are
 
 ### 7.4 Publish to GitHub Releases
 
-The build uses `GH_TOKEN` (`GITHUB_TOKEN`) and electron-builder’s **GitHub** publisher (see `electron-builder.mjs`). Ensure default `GITHUB_TOKEN` permissions allow **contents: write** for releases if publishing fails.
+The build uses `GH_TOKEN` (`GITHUB_TOKEN`) and electron-builder’s **GitHub** publisher (see `electron-builder.mjs`).
+
+The **desktop-release** workflow sets `permissions: contents: write` so the job can **create releases** and upload the DMG. Without that, GitHub returns **403** (`Resource not accessible by integration`) when creating `v0.1.0` (or your current `package.json` version tag).
+
+If your org forbids elevating the token in workflows, create a **Personal Access Token** (classic: `repo` scope) or fine-grained token with **Contents: Read and write**, store it as e.g. `DESKTOP_RELEASE_GITHUB_TOKEN`, and set `GH_TOKEN: ${{ secrets.DESKTOP_RELEASE_GITHUB_TOKEN }}` in the **Build DMG** step instead of `GITHUB_TOKEN`.
 
 ---
 

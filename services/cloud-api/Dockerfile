@@ -1,4 +1,7 @@
-FROM python:3.11-slim
+# Empty REGISTRY_PREFIX = pull from Docker Hub (local builds). Set to "<acr>.azurecr.io/" for ACR cloud
+# build after `az acr import` of library/python:3.11-slim (avoids Docker Hub anonymous rate limits).
+ARG REGISTRY_PREFIX=
+FROM ${REGISTRY_PREFIX}python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
