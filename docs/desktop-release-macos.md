@@ -219,7 +219,7 @@ The build uses `GH_TOKEN` (`GITHUB_TOKEN`) and electron-builder’s **GitHub** p
 
 ## 8) How CI runs (summary)
 
-On **push to `master`** when paths match (desktop, packages, sidecar, release scripts, `VERSION`, lockfiles, or this workflow):
+On **push to `master`** when paths match (desktop, packages, sidecar, release scripts, `VERSION`, lockfiles, or this workflow), or when you **Run workflow** manually (**Actions** → **desktop-release** → **Run workflow**):
 
 1. `npm ci`, desktop tests, sidecar PyInstaller + ffmpeg  
 2. Import `.p12` on the runner (if signing secrets are set)  

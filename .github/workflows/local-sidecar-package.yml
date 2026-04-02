@@ -1,6 +1,7 @@
 name: local-sidecar-package
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
