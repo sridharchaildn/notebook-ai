@@ -350,6 +350,18 @@ h1, h2, h3, h4, h5, h6 {
   padding-top: 4px;
 }
 
+.download-mac-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.download-mac-btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
 .hero-badges {
   display: flex;
   gap: 8px;

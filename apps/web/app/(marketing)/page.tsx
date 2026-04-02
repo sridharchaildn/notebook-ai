@@ -46,6 +46,14 @@ function CheckIcon() {
   );
 }
 
+function AppleIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M17.566 12.524c.018 1.927 1.694 2.567 1.712 2.575-.014.045-.267.914-.881 1.813-.53.775-1.08 1.548-1.946 1.565-.85.016-1.124-.504-2.097-.504-.972 0-1.276.488-2.08.52-.836.031-1.473-.842-2.007-1.614-1.091-1.578-1.925-4.462-.806-6.402.556-.964 1.55-1.574 2.63-1.59.821-.016 1.596.552 2.096.552.5 0 1.437-.683 2.42-.583.412.017 1.568.167 2.31 1.253-.06.037-1.38.804-1.36 2.015Zm-1.362-5.768c.444-.538.744-1.286.662-2.032-.64.026-1.414.426-1.872.963-.41.474-.768 1.232-.672 1.956.713.056 1.438-.362 1.882-.887Z" />
+    </svg>
+  );
+}
+
 function MiniShieldIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" style={{ width: 13, height: 13, flexShrink: 0 }}>
@@ -81,6 +89,9 @@ function OpenRouterLogo() {
 }
 
 export default function MarketingPage() {
+  const desktopDownloadUrl = process.env.NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL
+    ?? 'https://github.com/sridharchaildn/notebook-ai/releases/latest';
+
   return (
     <main className="web-shell text-text">
       {/* ── Nav ── */}
@@ -118,6 +129,12 @@ export default function MarketingPage() {
             <Link href="/auth/signup">
               <UIButton>Start Free →</UIButton>
             </Link>
+            <a href={desktopDownloadUrl} target="_blank" rel="noreferrer" aria-label="Download Notebook AI for Mac">
+              <UIButton className="download-mac-btn">
+                <AppleIcon />
+                Download for Mac
+              </UIButton>
+            </a>
             <a href="#compare">
               <UIButton variant="ghost">Compare pricing</UIButton>
             </a>
@@ -302,6 +319,12 @@ export default function MarketingPage() {
           <h2 className="cta-title">Ready to take notes smarter?</h2>
           <p className="section-subtitle">Get started in under a minute. No credit card required.</p>
           <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+            <a href={desktopDownloadUrl} target="_blank" rel="noreferrer" aria-label="Download Notebook AI for Mac">
+              <UIButton className="download-mac-btn">
+                <AppleIcon />
+                Download for Mac
+              </UIButton>
+            </a>
             <Link href="/auth/signup">
               <UIButton>Start Free →</UIButton>
             </Link>
