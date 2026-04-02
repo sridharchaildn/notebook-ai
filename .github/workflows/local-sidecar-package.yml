@@ -27,7 +27,7 @@ jobs:
           services/local-sidecar/.venv/bin/python -m pip install -e './services/local-sidecar[dev]' pyinstaller
 
       - name: Run tests
-        run: services/local-sidecar/.venv/bin/python -m pytest
+        run: .venv/bin/python -m pytest
         working-directory: services/local-sidecar
 
       - name: Package sidecar binary
