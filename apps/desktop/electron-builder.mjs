@@ -35,6 +35,7 @@ export default {
   extraResources,
   artifactName: 'Notebook-AI-${version}-${arch}.${ext}',
   mac: {
+    icon: 'assets/icon.icns',
     category: 'public.app-category.productivity',
     target: ['dmg'],
     hardenedRuntime: true,

@@ -257,10 +257,25 @@ On **push to `master`** when paths match (desktop, packages, sidecar, release sc
 | `notarytool` / notarization auth errors | Wrong `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, or bad base64 `.p8`; or key role too limited (try Admin). |
 | No API keys in App Store Connect | Click **Request Access** or ask Account Holder; use §6.5 meanwhile. |
 | Publish / release failures | Token permissions, draft vs published release, or repo name in `electron-builder.mjs`. |
+| DMG shows default Electron atom icon | Missing or stale `apps/desktop/assets/icon.icns`; run `scripts/release/generate-macos-icon-from-svg.sh` and ensure `mac.icon` in `electron-builder.mjs` points at it. |
 
 ---
 
-## 11) Operational habits
+## 11) App icon (macOS)
+
+The packaged **.app** and **DMG** use `apps/desktop/assets/icon.icns`, generated from the same book artwork as `icon.svg`. `electron-builder` is configured with `mac.icon: assets/icon.icns`.
+
+After editing `apps/desktop/assets/icon.svg`, regenerate on a Mac:
+
+```bash
+bash scripts/release/generate-macos-icon-from-svg.sh
+```
+
+Commit the updated `icon.icns` so CI builds pick it up.
+
+---
+
+## 12) Operational habits
 
 - Prefer **API key** notarization over app-specific passwords.
 - Rotate API keys periodically; revoke old keys after cutover.
