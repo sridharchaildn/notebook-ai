@@ -47,7 +47,14 @@ export default {
     },
   },
   dmg: {
-    sign: false,
+    sign: true,
   },
-  publish: null,
+  publish: [
+    {
+      provider: 'github',
+      owner: 'sridharchaildn',
+      repo: 'notebook-ai',
+      releaseType: 'draft',
+    },
+  ],
 };

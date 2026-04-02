@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 /** @type {import('next').NextConfig} */
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -13,6 +15,7 @@ const contentSecurityPolicy = [
 ].join('; ');
 
 const nextConfig = {
+  outputFileTracingRoot: path.join(process.cwd(), '../..'),
   transpilePackages: ['@notebook-ai/ui', '@notebook-ai/theme', '@notebook-ai/contracts'],
   async headers() {
     if (process.env.NODE_ENV !== 'production') {

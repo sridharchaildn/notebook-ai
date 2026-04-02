@@ -15,4 +15,5 @@ npm run version:sync
 NOTEBOOK_BUILD_VERSION="$BUILD_VERSION" npm run build:desktop
 
 cd "$ROOT/apps/desktop"
-NOTEBOOK_BUILD_VERSION="$BUILD_VERSION" npm exec --yes electron-builder -- --config electron-builder.mjs --mac dmg
+PUBLISH_MODE="${NOTEBOOK_DESKTOP_PUBLISH:-never}"
+NOTEBOOK_BUILD_VERSION="$BUILD_VERSION" npm exec --yes electron-builder -- --config electron-builder.mjs --mac dmg --publish "$PUBLISH_MODE"
