@@ -96,14 +96,11 @@ interface Props {
   onTranscriptionPreferencesChange: (
     patch: Partial<Omit<TranscriptionPreferences, 'updated_at'>>,
   ) => void;
-  transcriptionEngine: 'whisper' | 'llm';
   transcriptionProvider: ProviderId;
   transcriptionModel: string;
   transcriptionModels: ProviderModel[];
   transcriptionModelsLoading: boolean;
   transcriptionModelsError: string;
-  onTranscriptionEngineChange: (engine: 'whisper' | 'llm') => void;
-  onTranscriptionProviderChange: (provider: ProviderId) => void;
   onTranscriptionModelChange: (model: string) => void;
   markdownSettings: MarkdownSettings;
   onMarkdownSettingsChange: (patch: Partial<Omit<MarkdownSettings, 'updated_at'>>) => void;
@@ -193,14 +190,11 @@ export function SettingsModal({
   onLogout,
   transcriptionPreferences,
   onTranscriptionPreferencesChange,
-  transcriptionEngine,
   transcriptionProvider,
   transcriptionModel,
   transcriptionModels,
   transcriptionModelsLoading,
   transcriptionModelsError,
-  onTranscriptionEngineChange,
-  onTranscriptionProviderChange,
   onTranscriptionModelChange,
   markdownSettings,
   onMarkdownSettingsChange,
@@ -603,46 +597,10 @@ export function SettingsModal({
 
           {activeTab === 'transcription' && (
             <>
-              <h3>Transcription Quality</h3>
+              <h3>Transcription</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', marginBottom: '16px' }}>
-                Capture quality determines how your audio is processed. Fast mode uses local or fast models, while Detailed mode uses slower, more accurate models.
+                Desktop recording uses one robust transcription path based on normalized local audio and OpenAI speech-to-text models.
               </p>
-
-              <div style={{ display: 'grid', gap: '10px' }}>
-                <article 
-                  className={`provider-chip${transcriptionEngine === 'whisper' ? ' active' : ''}`}
-                  style={{ cursor: 'pointer', borderColor: transcriptionEngine === 'whisper' ? 'var(--primary)' : undefined, opacity: transcriptionEngine === 'whisper' ? 1 : 0.6 }}
-                  onClick={() => onTranscriptionEngineChange('whisper')}
-                >
-                  <div className="provider-chip__title">
-                    <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
-                      <Waves size={14} />
-                      Fast Mode
-                    </span>
-                    <span title="Uses Whisper for real-time, fast transcription. Good for clear audio and quick notes.">
-                      <Info size={16} style={{ color: 'var(--text-tertiary)' }} />
-                    </span>
-                  </div>
-                  <small>Optimized for speed and local processing.</small>
-                </article>
-
-                <article 
-                  className={`provider-chip${transcriptionEngine === 'llm' ? ' active' : ''}`}
-                  style={{ cursor: 'pointer', borderColor: transcriptionEngine === 'llm' ? 'var(--primary)' : undefined, opacity: transcriptionEngine === 'llm' ? 1 : 0.6 }}
-                  onClick={() => onTranscriptionEngineChange('llm')}
-                >
-                  <div className="provider-chip__title">
-                    <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
-                      <Brain size={14} />
-                      Detailed Mode
-                    </span>
-                    <span title="Uses advanced language models to deeply understand complex context, accents, and industry terms.">
-                      <Info size={16} style={{ color: 'var(--text-tertiary)' }} />
-                    </span>
-                  </div>
-                  <small>Optimized for deeper accuracy on complex topics.</small>
-                </article>
-              </div>
 
               <div className="byok-form" style={{ marginTop: '16px' }}>
                 <div className="model-brand">
@@ -666,23 +624,7 @@ export function SettingsModal({
                 </div>
                 <label>
                   Provider
-                  <select
-                    value={transcriptionProvider}
-                    onChange={(event) => onTranscriptionProviderChange(event.target.value as ProviderId)}
-                    disabled={transcriptionEngine === 'whisper' || connectedProviders.length === 0}
-                  >
-                    {transcriptionEngine === 'whisper' ? (
-                      <option value="openai">OpenAI</option>
-                    ) : connectedProviders.length === 0 ? (
-                      <option value={transcriptionProvider}>Connect a provider first</option>
-                    ) : (
-                      connectedProviders.map((provider) => (
-                        <option key={provider} value={provider}>
-                          {providerLabel[provider]}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                  <input type="text" value="OpenAI speech-to-text" readOnly disabled />
                 </label>
 
                 <ModelPicker
@@ -691,16 +633,16 @@ export function SettingsModal({
                   models={transcriptionModels}
                   loading={transcriptionModelsLoading}
                   disabled={transcriptionModels.length === 0}
-                  placeholder="Choose an audio model"
+                  placeholder="Choose an OpenAI audio model"
                   onChange={onTranscriptionModelChange}
                 />
 
                 {transcriptionModelsError ? (
                   <small style={{ color: 'var(--danger)' }}>{transcriptionModelsError}</small>
-                ) : transcriptionEngine === 'whisper' ? (
-                  <small>Fast Mode currently uses OpenAI speech-to-text models only.</small>
+                ) : connectedProviders.includes('openai') ? (
+                  <small>Desktop recording uses OpenAI speech-to-text models only.</small>
                 ) : (
-                  <small>Detailed Mode can use OpenAI or OpenRouter audio-capable models.</small>
+                  <small>Connect OpenAI in AI Connection to choose a transcription model.</small>
                 )}
 
                 <label>

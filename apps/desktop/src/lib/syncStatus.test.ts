@@ -38,10 +38,10 @@ describe('sync status helpers', () => {
     expect(buildSyncBannerModel(status, 'Notebook AI') ).toEqual({
       tone: 'syncing',
       title: 'Uploading to Drive',
-      detail: '2 of 5 items • Interview Assist 6:12 PM',
+      detail: '2 of 5 sync items • Interview Assist 6:12 PM',
       progressPercent: 40,
     });
-    expect(describeSyncStatus(status, 'Notebook AI')).toContain('Syncing 2/5 items');
+    expect(describeSyncStatus(status, 'Notebook AI')).toContain('Syncing 2/5 sync items');
   });
 
   it('builds a queued model when changes are waiting', () => {

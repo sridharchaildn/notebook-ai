@@ -92,6 +92,12 @@ class StorageProfileStore:
         }
         self._write_sync_payload(payload)
 
+    def set_pending_ops(self, pending_ops: int) -> SyncStatus:
+        payload = self._read_sync_payload()
+        payload["pending_ops"] = max(pending_ops, 0)
+        self._write_sync_payload(payload)
+        return self.get_sync_status()
+
     def set_sync_enabled(self, enabled: bool) -> SyncStatus:
         status = self._read_sync_payload()
         payload = {
@@ -181,7 +187,6 @@ class StorageProfileStore:
         deleted = {str(item) for item in payload.get("deleted_note_ids") or []}
         deleted.add(note_id)
         payload["deleted_note_ids"] = sorted(deleted)
-        payload["pending_ops"] = int(payload.get("pending_ops", 0)) + 1
         self._write_sync_payload(payload)
 
     def record_folder_deletion(self, folder_id: str) -> None:
@@ -189,7 +194,6 @@ class StorageProfileStore:
         deleted = {str(item) for item in payload.get("deleted_folder_ids") or []}
         deleted.add(folder_id)
         payload["deleted_folder_ids"] = sorted(deleted)
-        payload["pending_ops"] = int(payload.get("pending_ops", 0)) + 1
         self._write_sync_payload(payload)
 
     def deleted_note_ids(self) -> set[str]:

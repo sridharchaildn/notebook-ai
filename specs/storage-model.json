@@ -5,6 +5,7 @@
   "local_bundle_layout": {
     "unfiled_root": "unfiled",
     "folders_root": "folders",
+    "capture_sessions_root": "capture-sessions",
     "folder_meta_filename": "_folder.json",
     "note_meta_filename": "_meta.json",
     "note_body_filename": "note.md",

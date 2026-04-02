@@ -113,7 +113,18 @@ class NoteStore:
         self._save_note(document)
         return document
 
+    def get_note(self, note_id: str) -> NoteDocument | None:
+        return self._load_existing_note(note_id)
+
     def update_note(self, note_id: str, payload: NoteUpdateRequest) -> NoteDocument:
+        updated, _changed = self.update_note_with_change_flag(note_id, payload)
+        return updated
+
+    def update_note_with_change_flag(
+        self,
+        note_id: str,
+        payload: NoteUpdateRequest,
+    ) -> tuple[NoteDocument, bool]:
         existing = self._load_existing_note(note_id)
         if not existing:
             raise FileNotFoundError(f"Note {note_id} not found")
@@ -146,13 +157,13 @@ class NoteStore:
             else payload.context_text
         )
 
-        updated = self._normalize_document(
+        draft = self._normalize_document(
             NoteDocument(
                 frontmatter=NoteFrontmatter(
                     id=existing.frontmatter.id,
                     title=payload.title.strip() or "Untitled note",
                     created_at=existing.frontmatter.created_at,
-                    updated_at=datetime.now(timezone.utc),
+                    updated_at=existing.frontmatter.updated_at,
                     tags=payload.tags,
                     provider=payload.provider,
                     model=payload.model,
@@ -166,16 +177,47 @@ class NoteStore:
                 session=next_session,
             ),
         )
+
+        if self._documents_equal(existing, draft):
+            return existing, False
+
+        updated = self._normalize_document(
+            NoteDocument(
+                frontmatter=NoteFrontmatter(
+                    id=draft.frontmatter.id,
+                    title=draft.frontmatter.title,
+                    created_at=draft.frontmatter.created_at,
+                    updated_at=datetime.now(timezone.utc),
+                    tags=draft.frontmatter.tags,
+                    provider=draft.frontmatter.provider,
+                    model=draft.frontmatter.model,
+                    folder_id=draft.frontmatter.folder_id,
+                    context_preset=draft.frontmatter.context_preset,
+                    context_text=draft.frontmatter.context_text,
+                ),
+                kind=draft.kind,
+                content_format=draft.content_format,
+                content=draft.content,
+                session=draft.session,
+            ),
+        )
         self._save_note(updated)
-        return updated
+        return updated, True
 
     def move_note(self, note_id: str, folder_id: str | None) -> NoteDocument:
+        updated, _changed = self.move_note_with_change_flag(note_id, folder_id)
+        return updated
+
+    def move_note_with_change_flag(self, note_id: str, folder_id: str | None) -> tuple[NoteDocument, bool]:
         existing = self._load_existing_note(note_id)
         if not existing:
             raise FileNotFoundError(f"Note {note_id} not found")
 
         if folder_id is not None and not self._folder_exists(folder_id):
             raise FileNotFoundError(f"Folder {folder_id} not found")
+
+        if existing.frontmatter.folder_id == folder_id:
+            return existing, False
 
         updated = self._normalize_document(
             NoteDocument(
@@ -198,7 +240,7 @@ class NoteStore:
             ),
         )
         self._save_note(updated)
-        return updated
+        return updated, True
 
     def delete_note(self, note_id: str) -> bool:
         removed = False
@@ -237,6 +279,10 @@ class NoteStore:
         return folder
 
     def update_folder(self, folder_id: str, name: str) -> FolderNode:
+        updated, _changed = self.update_folder_with_change_flag(folder_id, name)
+        return updated
+
+    def update_folder_with_change_flag(self, folder_id: str, name: str) -> tuple[FolderNode, bool]:
         normalized = name.strip()
         if not normalized:
             raise ValueError("Folder name cannot be empty")
@@ -245,6 +291,9 @@ class NoteStore:
         if existing is None:
             raise FileNotFoundError(f"Folder {folder_id} not found")
 
+        if existing.folder.name == normalized:
+            return existing.folder, False
+
         updated = FolderNode(
             id=existing.folder.id,
             name=normalized,
@@ -252,12 +301,14 @@ class NoteStore:
             updated_at=_parse_datetime(_utcnow_iso()),
         )
         self._upsert_folder(updated)
-        return updated
+        return updated, True
 
-    def delete_folder(self, folder_id: str) -> bool:
+    def delete_folder(self, folder_id: str) -> list[str] | None:
         existing = self._find_folder_record(folder_id)
         if existing is None:
-            return False
+            return None
+
+        moved_note_ids: list[str] = []
 
         for child in sorted(existing.path.iterdir()):
             if child.name == FOLDER_META_FILENAME or not child.is_dir():
@@ -266,12 +317,13 @@ class NoteStore:
             if note is None:
                 continue
             self.move_note(note.frontmatter.id, None)
+            moved_note_ids.append(note.frontmatter.id)
 
         metadata_path = existing.path / FOLDER_META_FILENAME
         metadata_path.unlink(missing_ok=True)
         if existing.path.exists():
             shutil.rmtree(existing.path, ignore_errors=True)
-        return True
+        return moved_note_ids
 
     def save_note_document(self, document: NoteDocument) -> NoteDocument:
         normalized = self._normalize_document(document)
@@ -592,6 +644,18 @@ class NoteStore:
             session=None,
         )
         return self._normalize_document(document)
+
+    def _documents_equal(self, left: NoteDocument, right: NoteDocument) -> bool:
+        left_payload = self.serialize_note_document(left)
+        right_payload = self.serialize_note_document(right)
+        return self._canonical_json(left_payload) == self._canonical_json(right_payload)
+
+    @staticmethod
+    def _canonical_json(payload: str) -> str:
+        try:
+            return json.dumps(json.loads(payload), sort_keys=True)
+        except json.JSONDecodeError:
+            return payload
 
     def _search_text_for(self, note: NoteDocument, folder_name: str) -> str:
         parts = [

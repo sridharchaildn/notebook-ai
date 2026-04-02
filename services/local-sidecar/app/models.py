@@ -17,6 +17,17 @@ WorkspaceKind = Literal["desktop_local_only", "drive_shared"]
 SyncState = Literal["idle", "syncing", "needs_setup", "error"]
 SyncPhase = Literal["idle", "preparing", "pulling", "merging", "pushing", "finalizing"]
 MarkdownEditorMode = Literal["rich_text", "preview"]
+CaptureSessionState = Literal[
+    "recording",
+    "stopping",
+    "finalizing",
+    "retry_needed",
+    "completed",
+    "failed",
+]
+CaptureSessionMode = Literal["notes", "interview_assist"]
+CaptureMode = Literal["mic", "system_audio_plus_mic", "system_audio"]
+TranscriptionEngine = Literal["whisper", "llm"]
 TranscriptionErrorCode = Literal[
     "invalid_audio_format",
     "auth_or_quota",
@@ -50,6 +61,46 @@ class TranscriptSegment(BaseModel):
     id: str
     text: str
     source_hint: SourceHint = "unknown"
+    chunk_index: int | None = None
+    started_at_ms: int | None = None
+    duration_ms: int | None = None
+
+
+class CaptureSessionStartRequest(BaseModel):
+    note_id: str | None = None
+    session_mode: CaptureSessionMode = "notes"
+    capture_mode: CaptureMode = "mic"
+    provider: ProviderId = "openai"
+    transcription_mode: TranscriptionEngine = "whisper"
+    model: str | None = None
+    context_preset: NoteContextPreset | None = None
+    context_text: str | None = None
+
+
+class CaptureSessionStatus(BaseModel):
+    session_id: str
+    note_id: str | None = None
+    session_mode: CaptureSessionMode
+    capture_mode: CaptureMode
+    provider: ProviderId
+    transcription_mode: TranscriptionEngine
+    model: str | None = None
+    state: CaptureSessionState
+    accepted_chunk_index: int = -1
+    pending_retry_count: int = 0
+    recoverable_error: bool = False
+    detail: str | None = None
+    transcript: str = ""
+    segments: list[TranscriptSegment] = Field(default_factory=list)
+    started_at: datetime
+    updated_at: datetime
+
+
+class CaptureSessionChunkAck(CaptureSessionStatus):
+    source_hint: SourceHint = "unknown"
+    accepted_chunk_started_at_ms: int | None = None
+    accepted_chunk_duration_ms: int | None = None
+    last_chunk_text: str | None = None
 
 
 class TranscriptSessionData(BaseModel):

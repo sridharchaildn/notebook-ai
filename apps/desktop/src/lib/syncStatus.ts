@@ -38,7 +38,7 @@ export function syncProgressPercent(syncStatus: SyncStatus | null): number {
 export function describeSyncStatus(status: SyncStatus, folderName?: string): string {
   const target = folderName || 'Notebook AI';
   if (status.state === 'syncing') {
-    return `Syncing ${status.completed_items ?? 0}/${status.total_items ?? 0} items to ${target}...`;
+    return `Syncing ${status.completed_items ?? 0}/${status.total_items ?? 0} sync items to ${target}...`;
   }
   if (status.state === 'needs_setup' && status.last_error) {
     return status.last_error;
@@ -69,7 +69,7 @@ export function buildSyncBannerModel(
     const title = syncPhaseLabel(syncStatus) ?? 'Syncing';
     const detail =
       total > 0
-        ? `${completed} of ${total} items${syncStatus.current_item ? ` • ${syncStatus.current_item}` : ''}`
+        ? `${completed} of ${total} sync items${syncStatus.current_item ? ` • ${syncStatus.current_item}` : ''}`
         : `Syncing to ${target}${syncStatus.current_item ? ` • ${syncStatus.current_item}` : ''}`;
     return {
       tone: 'syncing',

@@ -3,6 +3,11 @@ import type {
   AITransformRequest,
   AITransformType,
   ContentFormat,
+  CaptureMode,
+  CaptureSessionChunkAck,
+  CaptureSessionMode,
+  CaptureSessionStartRequest,
+  CaptureSessionStatus,
   DriveConnectionStatus,
   FolderNode,
   InterviewCoachRequest,
@@ -25,7 +30,11 @@ import type {
   SyncStatus,
   TranscriptionPreferences,
   TranscriptionChunkResponse,
+  TranscriptionEngine,
 } from '@notebook-ai/contracts';
+import { buildLiveCaptureChunkFilename, LIVE_CAPTURE_MIME_TYPE } from './liveAudioCapture';
+
+export type { TranscriptionEngine } from '@notebook-ai/contracts';
 
 const LOCAL_BASE_URL = import.meta.env.VITE_LOCAL_API_URL ?? 'http://127.0.0.1:8787';
 const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? 'http://127.0.0.1:8790';
@@ -66,13 +75,27 @@ export function setRendererSessionFallback(session: DesktopRendererSession | nul
   rendererSessionFallback = session;
 }
 
+function isRendererSessionExpired(session: DesktopRendererSession | null): boolean {
+  return Boolean(session?.expiresAt && session.expiresAt * 1000 <= Date.now() + 5_000);
+}
+
 async function getDesktopAuthSession() {
   const bridgeSession = await window.notebookDesktop?.getAuthSession?.();
   if (bridgeSession?.userId) {
+    if (isRendererSessionExpired(bridgeSession)) {
+      await clearDesktopAuthSession();
+      return null;
+    }
     setRendererSessionFallback(bridgeSession);
     return bridgeSession;
   }
-  return getRendererSessionFallback();
+
+  const fallbackSession = getRendererSessionFallback();
+  if (isRendererSessionExpired(fallbackSession)) {
+    await clearDesktopAuthSession();
+    return null;
+  }
+  return fallbackSession;
 }
 
 async function getDesktopAccessToken(): Promise<string | null> {
@@ -605,8 +628,6 @@ export async function streamInterviewCoach(
   await consumeSseStream(res, onToken);
 }
 
-export type TranscriptionEngine = 'whisper' | 'llm';
-
 function audioExtensionFromMimeType(mimeType: string): string {
   const normalized = mimeType.toLowerCase();
   if (normalized.includes('webm')) return 'webm';
@@ -616,6 +637,88 @@ function audioExtensionFromMimeType(mimeType: string): string {
   if (normalized.includes('mp4')) return 'mp4';
   if (normalized.includes('flac')) return 'flac';
   return 'webm';
+}
+
+export async function startCaptureSession(
+  payload: CaptureSessionStartRequest,
+): Promise<CaptureSessionStatus> {
+  const res = await fetch(`${LOCAL_BASE_URL}/capture-sessions/start`, {
+    method: 'POST',
+    headers: await localAuthHeaders('json'),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to start capture session.');
+  }
+  return (await res.json()) as CaptureSessionStatus;
+}
+
+export async function appendCaptureSessionChunk(
+  sessionId: string,
+  chunk: Blob,
+  chunkIndex: number,
+  options?: {
+    sourceHint?: 'me' | 'other_audio' | 'unknown';
+    startedAtMs?: number;
+    durationMs?: number;
+  },
+): Promise<CaptureSessionChunkAck> {
+  const formData = new FormData();
+  const filename =
+    chunk.type === LIVE_CAPTURE_MIME_TYPE
+      ? buildLiveCaptureChunkFilename(chunkIndex)
+      : `chunk-${chunkIndex}.${audioExtensionFromMimeType(chunk.type)}`;
+  formData.append('file', chunk, filename);
+  formData.append('chunk_index', String(chunkIndex));
+  formData.append('source_hint', options?.sourceHint ?? 'unknown');
+  if (typeof options?.startedAtMs === 'number') {
+    formData.append('started_at_ms', String(Math.max(0, Math.round(options.startedAtMs))));
+  }
+  if (typeof options?.durationMs === 'number') {
+    formData.append('duration_ms', String(Math.max(0, Math.round(options.durationMs))));
+  }
+
+  const res = await fetch(`${LOCAL_BASE_URL}/capture-sessions/${encodeURIComponent(sessionId)}/chunks`, {
+    method: 'POST',
+    headers: await localAuthHeaders('none'),
+    body: formData,
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to append captured audio chunk.');
+  }
+  return (await res.json()) as CaptureSessionChunkAck;
+}
+
+export async function finalizeCaptureSession(sessionId: string): Promise<CaptureSessionStatus> {
+  const res = await fetch(`${LOCAL_BASE_URL}/capture-sessions/${encodeURIComponent(sessionId)}/finalize`, {
+    method: 'POST',
+    headers: await localAuthHeaders('none'),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to finalize capture session.');
+  }
+  return (await res.json()) as CaptureSessionStatus;
+}
+
+export async function fetchCaptureSessionStatus(sessionId: string): Promise<CaptureSessionStatus> {
+  const res = await fetch(`${LOCAL_BASE_URL}/capture-sessions/${encodeURIComponent(sessionId)}`, {
+    headers: await localAuthHeaders('none'),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to load capture session status.');
+  }
+  return (await res.json()) as CaptureSessionStatus;
+}
+
+export async function retryCaptureSessionRecovery(sessionId: string): Promise<CaptureSessionStatus> {
+  const res = await fetch(`${LOCAL_BASE_URL}/capture-sessions/${encodeURIComponent(sessionId)}/retry-recovery`, {
+    method: 'POST',
+    headers: await localAuthHeaders('none'),
+  });
+  if (!res.ok) {
+    throw await parseResponseError(res, 'Unable to retry capture recovery.');
+  }
+  return (await res.json()) as CaptureSessionStatus;
 }
 
 export async function transcribeAudioChunk(

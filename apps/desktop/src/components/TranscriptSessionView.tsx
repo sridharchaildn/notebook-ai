@@ -7,7 +7,6 @@ import type {
 import { Maximize2, Minimize2, Settings2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-import type { TranscriptionEngine } from '../lib/api';
 import { sourceHintLabel } from '../lib/noteMetadata';
 import { ModelPicker, providerLabel } from './ProviderModelPicker';
 import { RichMarkdownEditor } from './RichMarkdownEditor';
@@ -24,7 +23,6 @@ interface Props {
   controlsCollapsed?: boolean;
   onToggleControls?: () => void;
   connectedProviders: ProviderId[];
-  transcriptionEngine: TranscriptionEngine;
   transcriptionProvider: ProviderId;
   transcriptionModel: string;
   transcriptionModels: ProviderModel[];
@@ -35,8 +33,6 @@ interface Props {
   copilotModels: ProviderModel[];
   copilotModelsLoading: boolean;
   copilotModelsError: string;
-  onTranscriptionEngineChange: (engine: TranscriptionEngine) => void;
-  onTranscriptionProviderChange: (provider: ProviderId) => void;
   onTranscriptionModelChange: (model: string) => void;
   onCopilotProviderChange: (provider: ProviderId) => void;
   onCopilotModelChange: (model: string) => void;
@@ -56,7 +52,6 @@ export function TranscriptSessionView({
   controlsCollapsed = false,
   onToggleControls,
   connectedProviders,
-  transcriptionEngine,
   transcriptionProvider,
   transcriptionModel,
   transcriptionModels,
@@ -67,8 +62,6 @@ export function TranscriptSessionView({
   copilotModels,
   copilotModelsLoading,
   copilotModelsError,
-  onTranscriptionEngineChange,
-  onTranscriptionProviderChange,
   onTranscriptionModelChange,
   onCopilotProviderChange,
   onCopilotModelChange,
@@ -81,10 +74,6 @@ export function TranscriptSessionView({
     .split(/\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean);
-  const audioProviderLocked = transcriptionEngine === 'whisper';
-  const audioProviderValue = audioProviderLocked
-    ? 'openai'
-    : (connectedProviders.includes(transcriptionProvider) ? transcriptionProvider : connectedProviders[0] ?? '');
   const copilotProviderValue = connectedProviders.includes(copilotProvider)
     ? copilotProvider
     : connectedProviders[0] ?? '';
@@ -138,7 +127,7 @@ export function TranscriptSessionView({
               Summary
             </button>
           </div>
-          <span className="status-pill">{transcriptionEngine === 'whisper' ? 'Fast' : 'Detailed'}</span>
+          <span className="status-pill">OpenAI STT</span>
           {contextPreset ? <span className="status-pill">{contextPreset}</span> : null}
           {segments.length > 0 ? <span className="status-pill">{segments.length} sections</span> : null}
           {activeTab === 'transcript' && segments.length > 0 ? (
@@ -161,55 +150,8 @@ export function TranscriptSessionView({
             <article className="transcript-quick-setup__card">
               <div className="transcript-quick-setup__card-header">
                 <h4>Audio</h4>
-                <p>Choose capture quality, provider, and model without leaving this transcript.</p>
+                <p>Choose the model used for the default desktop transcription path.</p>
               </div>
-
-              <div className="transcript-quick-setup__field">
-                <span className="transcript-quick-setup__label">Quality</span>
-                <div className="compact-toggle" role="group" aria-label="Audio quality">
-                  <button
-                    type="button"
-                    className={`compact-toggle-btn${transcriptionEngine === 'whisper' ? ' active' : ''}`}
-                    onClick={() => onTranscriptionEngineChange('whisper')}
-                  >
-                    Fast
-                  </button>
-                  <button
-                    type="button"
-                    className={`compact-toggle-btn${transcriptionEngine === 'llm' ? ' active' : ''}`}
-                    onClick={() => onTranscriptionEngineChange('llm')}
-                  >
-                    Detailed
-                  </button>
-                </div>
-              </div>
-
-              <label className="transcript-quick-setup__field">
-                <span className="transcript-quick-setup__label">Audio provider</span>
-                <select
-                  className="transcript-quick-setup__select"
-                  value={audioProviderValue}
-                  disabled={audioProviderLocked || connectedProviders.length === 0}
-                  onChange={(event) => onTranscriptionProviderChange(event.target.value as ProviderId)}
-                >
-                  {audioProviderLocked ? (
-                    <option value="openai">OpenAI</option>
-                  ) : connectedProviders.length === 0 ? (
-                    <option value="">Connect a provider in Settings</option>
-                  ) : (
-                    connectedProviders.map((provider) => (
-                      <option key={provider} value={provider}>
-                        {providerLabel[provider]}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <small className="transcript-quick-setup__hint">
-                  {audioProviderLocked
-                    ? 'Fast mode currently uses OpenAI audio transcription.'
-                    : 'Detailed mode can use any connected provider.'}
-                </small>
-              </label>
 
               <ModelPicker
                 label="Audio model"
@@ -217,11 +159,13 @@ export function TranscriptSessionView({
                 models={transcriptionModels}
                 loading={transcriptionModelsLoading}
                 disabled={transcriptionModels.length === 0 && !transcriptionModelsLoading}
-                placeholder={audioProviderLocked ? 'Select an OpenAI audio model' : 'Select an audio model'}
+                placeholder="Select an OpenAI audio model"
                 onChange={onTranscriptionModelChange}
               />
               {transcriptionModelsError ? (
                 <p className="transcript-quick-setup__error">{transcriptionModelsError}</p>
+              ) : connectedProviders.includes('openai') ? (
+                <p className="transcript-quick-setup__hint">Desktop recording uses OpenAI speech-to-text models.</p>
               ) : null}
             </article>
 

@@ -148,6 +148,7 @@ class TranscriptionService:
         audio_bytes: bytes,
         filename: str,
         content_type: str,
+        audio_origin: str = "file_upload",
         provider: str = "openai",
         transcription_mode: str = "whisper",
         segment_id: int | None = None,
@@ -174,6 +175,7 @@ class TranscriptionService:
                 audio_bytes=audio_bytes,
                 filename=filename,
                 content_type=content_type,
+                audio_origin=audio_origin,
                 provider=provider,
                 model=model,
                 context_preset=context_preset,
@@ -210,6 +212,7 @@ class TranscriptionService:
         audio_bytes: bytes,
         filename: str,
         content_type: str,
+        audio_origin: str = "file_upload",
         provider: str,
         model: str | None = None,
         context_preset: str | None = None,
@@ -279,6 +282,7 @@ class TranscriptionService:
             audio_bytes,
             filename,
             content_type,
+            audio_origin=audio_origin,
             ffmpeg_path=str(self.settings.ffmpeg_path) if self.settings.ffmpeg_path else None,
         )
         if prepared.error:
@@ -593,12 +597,23 @@ def _prepare_llm_audio_for_openai_input(
     audio_bytes: bytes,
     filename: str,
     content_type: str,
+    audio_origin: str = "file_upload",
     ffmpeg_path: str | None = None,
 ) -> _LLMAudioPrepared:
-    """OpenAI input_audio only allows format wav or mp3; browsers usually emit WebM."""
+    """OpenAI input_audio only allows format wav or mp3."""
     fmt = _guess_audio_format(filename, content_type)
     if fmt in {"wav", "mp3"}:
         return _LLMAudioPrepared(data=audio_bytes, api_format=fmt)
+
+    if audio_origin == "desktop_live_capture":
+        return _LLMAudioPrepared(
+            data=b"",
+            api_format="wav",
+            error=(
+                "Desktop live capture must send normalized WAV audio. "
+                "Restart the recording and try again."
+            ),
+        )
 
     wav = _ffmpeg_transcode_to_wav(audio_bytes, ffmpeg_path=ffmpeg_path)
     if wav is not None:
@@ -614,8 +629,8 @@ def _prepare_llm_audio_for_openai_input(
         data=b"",
         api_format="wav",
         error=(
-            "LLM mode needs WAV or MP3 for OpenAI; the recorder sent WebM/Opus. "
-            "Install `ffmpeg` on the host running the sidecar (PATH), or use Whisper API mode."
+            "LLM mode needs WAV or MP3 for OpenAI. Re-export this audio as WAV/MP3, "
+            "or install `ffmpeg` on the host running the sidecar so unsupported files can be transcoded."
         ),
     )
 
@@ -680,7 +695,7 @@ def _llm_transcription_error_hint(status: int, body_preview: str, model: str) ->
     if status == 400 and "webm" in low and "supported values" in low:
         return (
             "Hint: OpenAI only allows input_audio.format wav or mp3. "
-            "Install ffmpeg on the sidecar host so WebM is transcoded automatically, or use Whisper API mode."
+            "If this came from an imported WebM file, install ffmpeg on the sidecar host or re-export the file as WAV/MP3."
         )
     return ""
 

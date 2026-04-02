@@ -1,11 +1,10 @@
-import type { NoteContextPreset } from '@notebook-ai/contracts';
-import { AudioLines, ChevronDown, ChevronUp, CircleStop, LoaderCircle, MessageSquareText, Mic, MonitorSpeaker, Waves } from 'lucide-react';
+import type {
+  CaptureMode,
+  CaptureSessionMode,
+  NoteContextPreset,
+} from '@notebook-ai/contracts';
+import { AudioLines, ChevronDown, ChevronUp, CircleStop, LoaderCircle, MessageSquareText, Mic, MonitorSpeaker } from 'lucide-react';
 import { useState } from 'react';
-
-import type { TranscriptionEngine } from '../lib/api';
-
-export type CaptureMode = 'mic' | 'system';
-export type CaptureSessionMode = 'notes' | 'interview_assist';
 
 export interface TranscriptionStartOptions {
   captureMode: CaptureMode;
@@ -16,6 +15,8 @@ interface Props {
   recording: boolean;
   busy: boolean;
   status: string;
+  elapsedMs?: number;
+  warning?: string | null;
   contextPreset?: NoteContextPreset;
   contextText?: string;
   onStart: (options: TranscriptionStartOptions) => void;
@@ -27,6 +28,8 @@ export function TranscriptionPanel({
   recording,
   busy,
   status,
+  elapsedMs = 0,
+  warning = null,
   contextPreset,
   contextText,
   onStart,
@@ -36,6 +39,7 @@ export function TranscriptionPanel({
   const [captureMode, setCaptureMode] = useState<CaptureMode>('mic');
   const [mode, setMode] = useState<CaptureSessionMode>('notes');
   const [isExpanded, setIsExpanded] = useState(!recording);
+  const elapsedLabel = formatElapsed(elapsedMs);
 
   const contextSummary = contextText?.trim()
     ? contextText.trim()
@@ -54,7 +58,7 @@ export function TranscriptionPanel({
               <AudioLines size={16} style={{ color: recording ? 'var(--danger)' : 'var(--primary)' }} />
             )}
             <span className="transcription-panel__collapsed-text">
-              {recording ? 'Recording live' : 'Ready'}
+              {recording ? `Recording ${elapsedLabel}` : 'Ready'}
             </span>
             {recording && <span className="status-dot live" />}
           </div>
@@ -102,7 +106,7 @@ export function TranscriptionPanel({
         <div className="transcription-panel__header-actions">
           <div className={`transcription-panel__live-pill${recording ? ' is-live' : ''}`}>
             <span className={`status-dot${recording ? ' live' : ''}`} />
-            {recording ? 'Recording live' : 'Ready'}
+            {recording ? `Recording ${elapsedLabel}` : 'Ready'}
           </div>
           <button
             type="button"
@@ -164,12 +168,12 @@ export function TranscriptionPanel({
               </button>
               <button
                 type="button"
-                className={`compact-toggle-btn${captureMode === 'system' ? ' active' : ''}`}
+                className={`compact-toggle-btn${captureMode === 'system_audio_plus_mic' ? ' active' : ''}`}
                 disabled={recording}
-                onClick={() => setCaptureMode('system')}
+                onClick={() => setCaptureMode('system_audio_plus_mic')}
               >
                 <MonitorSpeaker size={16} />
-                <span className="compact-toggle-btn__title">System Audio</span>
+                <span className="compact-toggle-btn__title">System audio + mic</span>
               </button>
             </div>
           </div>
@@ -202,6 +206,23 @@ export function TranscriptionPanel({
         <span className={`status-dot${recording ? ' live' : ''}`} />
         <span className="status-text">{status}</span>
       </div>
+      {warning ? (
+        <div className="transcription-status-bar">
+          <span className="status-dot" />
+          <span className="status-text">{warning}</span>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function formatElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }

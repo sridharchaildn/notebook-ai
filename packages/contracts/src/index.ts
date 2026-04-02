@@ -12,6 +12,16 @@ export type SyncPhase = 'idle' | 'preparing' | 'pulling' | 'merging' | 'pushing'
 export type ModelUseCase = 'copilot' | 'transcription';
 export type MarkdownEditorMode = 'rich_text' | 'preview';
 export type ProviderCredentialScope = 'desktop_local' | 'account_vault' | 'none';
+export type CaptureSessionState =
+  | 'recording'
+  | 'stopping'
+  | 'finalizing'
+  | 'retry_needed'
+  | 'completed'
+  | 'failed';
+export type CaptureSessionMode = 'notes' | 'interview_assist';
+export type CaptureMode = 'mic' | 'system_audio_plus_mic' | 'system_audio';
+export type TranscriptionEngine = 'whisper' | 'llm';
 
 export interface NoteFrontmatter {
   id: string;
@@ -40,6 +50,8 @@ export interface ProviderCapability {
   supports_transcription: boolean;
   supports_oauth: boolean;
   supports_api_key: boolean;
+  supports_whisper_api_transcription?: boolean;
+  supports_audio_input_transcription?: boolean;
   preferred_for?: Array<'notes' | 'interview' | 'transcription'>;
 }
 
@@ -130,6 +142,46 @@ export interface TranscriptSegment {
   id: string;
   text: string;
   source_hint: SourceHint;
+  chunk_index?: number | null;
+  started_at_ms?: number | null;
+  duration_ms?: number | null;
+}
+
+export interface CaptureSessionStartRequest {
+  note_id?: string | null;
+  session_mode: CaptureSessionMode;
+  capture_mode: CaptureMode;
+  provider: ProviderId;
+  transcription_mode: TranscriptionEngine;
+  model?: string | null;
+  context_preset?: NoteContextPreset | null;
+  context_text?: string | null;
+}
+
+export interface CaptureSessionStatus {
+  session_id: string;
+  note_id?: string | null;
+  session_mode: CaptureSessionMode;
+  capture_mode: CaptureMode;
+  provider: ProviderId;
+  transcription_mode: TranscriptionEngine;
+  model?: string | null;
+  state: CaptureSessionState;
+  accepted_chunk_index: number;
+  pending_retry_count: number;
+  recoverable_error: boolean;
+  detail?: string | null;
+  transcript: string;
+  segments: TranscriptSegment[];
+  started_at: string;
+  updated_at: string;
+}
+
+export interface CaptureSessionChunkAck extends CaptureSessionStatus {
+  source_hint: SourceHint;
+  accepted_chunk_started_at_ms?: number | null;
+  accepted_chunk_duration_ms?: number | null;
+  last_chunk_text?: string | null;
 }
 
 export interface TranscriptSessionData {

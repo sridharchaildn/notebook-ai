@@ -120,7 +120,7 @@ def test_folder_crud_and_move(tmp_path: Path):
     assert renamed.name == "Interview Prep"
 
     removed = store.delete_folder(folder.id)
-    assert removed is True
+    assert removed == [created.frontmatter.id]
 
     reloaded = store.list_notes()[0]
     assert reloaded.frontmatter.folder_id is None

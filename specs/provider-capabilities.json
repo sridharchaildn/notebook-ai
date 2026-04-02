@@ -5,6 +5,8 @@
       "provider": "openai",
       "supports_streaming": true,
       "supports_transcription": true,
+      "supports_whisper_api_transcription": true,
+      "supports_audio_input_transcription": true,
       "supports_oauth": true,
       "supports_api_key": true,
       "preferred_for": ["notes", "interview", "transcription"]
@@ -12,7 +14,9 @@
     {
       "provider": "openrouter",
       "supports_streaming": true,
-      "supports_transcription": false,
+      "supports_transcription": true,
+      "supports_whisper_api_transcription": false,
+      "supports_audio_input_transcription": true,
       "supports_oauth": false,
       "supports_api_key": true,
       "preferred_for": ["notes", "interview"]

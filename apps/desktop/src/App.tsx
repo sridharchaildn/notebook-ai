@@ -12,6 +12,10 @@ import {
 import type {
   CopilotChatMessage,
   AITransformType,
+  CaptureMode,
+  CaptureSessionMode,
+  CaptureSessionStartRequest,
+  CaptureSessionStatus,
   ContentFormat,
   DriveConnectionStatus,
   FolderNode,
@@ -45,14 +49,12 @@ import { SplashScreen } from './components/SplashScreen';
 import { SyncStatusBanner } from './components/SyncStatusBanner';
 import { TagEditor } from './components/TagEditor';
 import { TranscriptSessionView } from './components/TranscriptSessionView';
+import { TranscriptionPanel } from './components/TranscriptionPanel';
 import {
-  TranscriptionPanel,
-  type CaptureMode,
-  type CaptureSessionMode,
-} from './components/TranscriptionPanel';
-import {
+  appendCaptureSessionChunk,
   authInvalidEventName,
   createFolder,
+  finalizeCaptureSession,
   createNote,
   deleteFolder,
   deleteNote,
@@ -78,17 +80,22 @@ import {
   setLocalRoot,
   storeByok,
   openGoogleDriveConnect,
+  retryCaptureSessionRecovery,
+  startCaptureSession,
   streamCopilotChat,
   streamInterviewCoach,
   streamTransform,
-  transcribeAudioChunk,
   updateMarkdownSettings,
   updateStoragePreference,
   updateNote,
   updateTranscriptionPreferences,
-  type TranscriptionEngine,
 } from './lib/api';
 import { describeSyncStatus } from './lib/syncStatus';
+import {
+  createLiveCaptureHandle,
+  type LiveCaptureChunk,
+  type LiveCaptureHandle,
+} from './lib/liveAudioCapture';
 import {
   completeDesktopAuthCallback,
   hasPendingDesktopAuthFlow,
@@ -98,8 +105,7 @@ import {
 
 const DEFAULT_BODY = 'Start typing...';
 const DELETE_UNDO_MS = 5000;
-const INTERVIEW_SEGMENT_MS = 8000;
-const INTERVIEW_RECOVERABLE_FAILURE_LIMIT = 2;
+const CAPTURE_CHUNK_MS = 8000;
 const INTERVIEW_TRANSCRIPT_TAIL_CHARS = 5000;
 const COACH_PLACEHOLDER = 'Waiting for a new interviewer question...';
 const DEFAULT_DRIVE_STATUS: DriveConnectionStatus = {
@@ -121,8 +127,6 @@ const INTERVIEW_FILLER_UTTERANCES = new Set([
 ]);
 const COPILOT_PROVIDER_STORAGE_KEY = 'notebook_copilot_provider';
 const COPILOT_MODEL_STORAGE_KEY = 'notebook_copilot_model';
-const TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY = 'notebook_transcription_llm_provider';
-const TRANSCRIPTION_LLM_MODEL_STORAGE_KEY = 'notebook_transcription_llm_model';
 const TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY = 'notebook_transcription_whisper_model';
 const ROOT_FOLDER_LABEL = 'Notes';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'notebook_sidebar_width';
@@ -149,11 +153,20 @@ interface PendingDeleteState {
 }
 
 interface SourceRecorderHandle {
-  sourceHint: Extract<SourceHint, 'me' | 'other_audio'>;
-  recorder: MediaRecorder;
-  chunks: Blob[];
-  done: Promise<Blob>;
+  sourceHint: SourceHint;
+  stopped: Promise<void>;
+  stop: () => Promise<void>;
 }
+
+type CaptureUiPhase =
+  | 'idle'
+  | 'requesting_permissions'
+  | 'recording'
+  | 'stopping'
+  | 'finalizing_local'
+  | 'transcribing'
+  | 'ready'
+  | 'retry_needed';
 
 function readStoredProviderId(key: string, fallback: ProviderId): ProviderId {
   const raw = localStorage.getItem(key);
@@ -179,6 +192,22 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
 
 function clampValue(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeNullableText(value: string | null | undefined): string | null {
+  const trimmed = (value ?? '').trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatElapsedMs(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 
 function useDebouncedEffect(effect: () => void, deps: unknown[], delay: number) {
@@ -228,12 +257,6 @@ export default function App() {
     readStoredProviderId(COPILOT_PROVIDER_STORAGE_KEY, 'openai'),
   );
   const [copilotModel, setCopilotModel] = useState(() => readStoredString(COPILOT_MODEL_STORAGE_KEY));
-  const [llmTranscriptionProvider, setLlmTranscriptionProvider] = useState<ProviderId>(() =>
-    readStoredProviderId(TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY, 'openai'),
-  );
-  const [llmTranscriptionModel, setLlmTranscriptionModel] = useState(() =>
-    readStoredString(TRANSCRIPTION_LLM_MODEL_STORAGE_KEY),
-  );
   const [whisperTranscriptionModel, setWhisperTranscriptionModel] = useState(() =>
     readStoredString(TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY),
   );
@@ -292,11 +315,15 @@ export default function App() {
   const [providerDisconnecting, setProviderDisconnecting] = useState<ProviderId | null>(null);
   const [aiOutput, setAiOutput] = useState('');
   const [settingsFeedback, setSettingsFeedback] = useState<SettingsFeedback | null>(null);
+  const [editorStatusMessage, setEditorStatusMessage] = useState('Saved');
   const [message, setMessage] = useState('Ready');
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteState | null>(null);
   const [recording, setRecording] = useState(false);
   const [transcriptionBusy, setTranscriptionBusy] = useState(false);
   const [transcriptionStatus, setTranscriptionStatus] = useState('Capture is idle');
+  const [captureUiPhase, setCaptureUiPhase] = useState<CaptureUiPhase>('idle');
+  const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
+  const [captureWarning, setCaptureWarning] = useState<string | null>(null);
   const [activeSessionMode, setActiveSessionMode] = useState<CaptureSessionMode>('notes');
   const [candidateMuted, setCandidateMuted] = useState(false);
   const [interviewTranscript, setInterviewTranscript] = useState('');
@@ -310,14 +337,6 @@ export default function App() {
   const [copilotChatDraft, setCopilotChatDraft] = useState('');
   const [copilotChatHistory, setCopilotChatHistory] = useState<CopilotChatMessage[]>([]);
   const [copilotChatBusy, setCopilotChatBusy] = useState(false);
-  const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>(() => {
-    return (localStorage.getItem('notebook_transcription_engine') as TranscriptionEngine) || 'whisper';
-  });
-
-  function handleTranscriptionEngineChange(engine: TranscriptionEngine) {
-    setTranscriptionEngine(engine);
-    localStorage.setItem('notebook_transcription_engine', engine);
-  }
 
   function clearSettingsFeedback() {
     setSettingsFeedback(null);
@@ -339,23 +358,19 @@ export default function App() {
 
   const [isMacPlatform] = useState(() => /mac/i.test(navigator.platform));
   const captureStreamRef = useRef<MediaStream | null>(null);
-  const audioStreamRef = useRef<MediaStream | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const micGainNodeRef = useRef<GainNode | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const pendingTitleFocusIdRef = useRef<string | null>(null);
-  /** Buffered recorder chunks; merged and transcribed once on stop as a complete audio file. */
-  const recordedAudioChunksRef = useRef<Blob[]>([]);
-  const transcriptionEngineSessionRef = useRef<TranscriptionEngine>('whisper');
+  const captureSessionIdRef = useRef<string | null>(null);
+  const captureSessionStatusRef = useRef<CaptureSessionStatus | null>(null);
+  const captureNoteIdRef = useRef<string | null>(null);
+  const captureStopRequestedRef = useRef(false);
+  const captureFinalizeInFlightRef = useRef(false);
+  const recordingStartedAtRef = useRef<number | null>(null);
+  const sourceRecorderHandlesRef = useRef<SourceRecorderHandle[]>([]);
   const sessionModeRef = useRef<CaptureSessionMode>('notes');
   const captureActiveRef = useRef(false);
-  const interviewSegmentTimerRef = useRef<number | null>(null);
-  const interviewSegmentChunksRef = useRef<Blob[]>([]);
-  const interviewSegmentQueueRef = useRef<Array<{ segmentId: number; blob: Blob }>>([]);
-  const interviewSegmentProcessingRef = useRef(false);
-  const nextInterviewSegmentIdRef = useRef(1);
-  const interviewRecoverableFailureCountRef = useRef(0);
   const interviewUpdateInFlightRef = useRef(false);
   const interviewTranscriptRef = useRef('');
   const interviewTurnsRef = useRef<InterviewTurn[]>([]);
@@ -372,11 +387,42 @@ export default function App() {
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const deleteUndoTimerRef = useRef<number | null>(null);
   const autoEnhanceNoteIdRef = useRef<string | null>(null);
+
+  function setCapturePhase(nextPhase: CaptureUiPhase) {
+    setCaptureUiPhase(nextPhase);
+    switch (nextPhase) {
+      case 'idle':
+        setTranscriptionStatus('Capture is idle');
+        return;
+      case 'requesting_permissions':
+        setTranscriptionStatus('Requesting permissions');
+        return;
+      case 'recording':
+        setTranscriptionStatus(`Recording ${formatElapsedMs(recordingElapsedMs)}`);
+        return;
+      case 'stopping':
+        setTranscriptionStatus('Stopping…');
+        return;
+      case 'finalizing_local':
+        setTranscriptionStatus('Finalizing local audio…');
+        return;
+      case 'transcribing':
+        setTranscriptionStatus('Transcribing…');
+        return;
+      case 'ready':
+        setTranscriptionStatus('Transcript ready');
+        return;
+      case 'retry_needed':
+        setTranscriptionStatus('Retry needed');
+        return;
+    }
+  }
   const authCallbackInFlightRef = useRef<string | null>(null);
   const lastHandledAuthCallbackRef = useRef<string | null>(null);
   const driveConnectPollingRef = useRef(false);
   const transformAbortRef = useRef<AbortController | null>(null);
   const copilotChatAbortRef = useRef<AbortController | null>(null);
+  const lastCompletedSyncRefreshRef = useRef<string | null>(null);
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
@@ -446,12 +492,22 @@ export default function App() {
     window.addEventListener('pointercancel', cleanup);
   }
 
-  function applyRendererSession(session: DesktopRendererSession | null) {
+  function syncRendererSessionState(session: DesktopRendererSession | null) {
     setRendererSessionFallback(session);
     setAuthPending(false);
     setManualSignInUrl(null);
     setSessionUserId(session?.userId ?? null);
     setShowSplash(!session?.userId);
+  }
+
+  function showSignedOutSplash(statusMessage: string) {
+    syncRendererSessionState(null);
+    setSettingsOpen(false);
+    setMessage(statusMessage);
+  }
+
+  function applyRendererSession(session: DesktopRendererSession | null) {
+    syncRendererSessionState(session);
     setMessage(session?.userId ? 'Signed in. Loading workspace...' : 'Ready');
   }
 
@@ -465,19 +521,14 @@ export default function App() {
     () => providers.filter((entry) => entry.connected).map((entry) => entry.provider),
     [providers],
   );
-  const activeTranscriptionProvider: ProviderId =
-    transcriptionEngine === 'whisper' ? 'openai' : llmTranscriptionProvider;
-  const activeTranscriptionModel =
-    transcriptionEngine === 'whisper' ? whisperTranscriptionModel : llmTranscriptionModel;
+  const activeTranscriptionProvider: ProviderId = 'openai';
+  const activeTranscriptionModel = whisperTranscriptionModel;
   const copilotModelCacheKey = `${copilotProvider}:copilot`;
   const transcriptionModelCacheKey = `${activeTranscriptionProvider}:transcription`;
   const copilotModelOptions = connectedProviders.includes(copilotProvider)
     ? providerModels[copilotModelCacheKey] ?? []
     : [];
-  const transcriptionProviderConnected =
-    transcriptionEngine === 'whisper'
-      ? connectedProviders.includes('openai')
-      : connectedProviders.includes(activeTranscriptionProvider);
+  const transcriptionProviderConnected = connectedProviders.includes('openai');
   const transcriptionModelOptions = transcriptionProviderConnected
     ? providerModels[transcriptionModelCacheKey] ?? []
     : [];
@@ -497,6 +548,23 @@ export default function App() {
       prev.filter((noteId) => notes.some((note) => note.frontmatter.id === noteId)),
     );
   }, [notes]);
+
+  useEffect(() => {
+    if (captureUiPhase !== 'recording') return;
+    setTranscriptionStatus(`Recording ${formatElapsedMs(recordingElapsedMs)}`);
+  }, [captureUiPhase, recordingElapsedMs]);
+
+  useEffect(() => {
+    if (!recording) return;
+    const timer = window.setInterval(() => {
+      const startedAt = recordingStartedAtRef.current;
+      if (!startedAt) return;
+      setRecordingElapsedMs(Date.now() - startedAt);
+    }, 250);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [recording]);
 
   function mergeProviderStatuses(statuses: ProviderConnection[]) {
     setProviders(
@@ -550,24 +618,18 @@ export default function App() {
   }, [copilotModel]);
 
   useEffect(() => {
-    localStorage.setItem(TRANSCRIPTION_LLM_PROVIDER_STORAGE_KEY, llmTranscriptionProvider);
-  }, [llmTranscriptionProvider]);
-
-  useEffect(() => {
-    if (llmTranscriptionModel.trim()) {
-      localStorage.setItem(TRANSCRIPTION_LLM_MODEL_STORAGE_KEY, llmTranscriptionModel);
-      return;
-    }
-    localStorage.removeItem(TRANSCRIPTION_LLM_MODEL_STORAGE_KEY);
-  }, [llmTranscriptionModel]);
-
-  useEffect(() => {
     if (whisperTranscriptionModel.trim()) {
       localStorage.setItem(TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY, whisperTranscriptionModel);
       return;
     }
     localStorage.removeItem(TRANSCRIPTION_WHISPER_MODEL_STORAGE_KEY);
   }, [whisperTranscriptionModel]);
+
+  useEffect(() => {
+    localStorage.removeItem('notebook_transcription_engine');
+    localStorage.removeItem('notebook_transcription_llm_provider');
+    localStorage.removeItem('notebook_transcription_llm_model');
+  }, []);
 
   useEffect(() => {
     interviewGuidanceRef.current = interviewGuidance;
@@ -704,13 +766,7 @@ export default function App() {
         event instanceof CustomEvent && typeof event.detail === 'string'
           ? event.detail
           : 'Session expired. Sign in again.';
-      setRendererSessionFallback(null);
-      setSessionUserId(null);
-      setAuthPending(false);
-      setManualSignInUrl(null);
-      setSettingsOpen(false);
-      setShowSplash(true);
-      setMessage(detail);
+      showSignedOutSplash(detail);
     };
 
     window.addEventListener(eventName, handler);
@@ -754,7 +810,7 @@ export default function App() {
       void handleDesktopAuthCallback(url);
     });
     const unsubscribeSession = window.notebookDesktop?.onAuthSessionUpdated?.((session) => {
-      applyRendererSession(session);
+      syncRendererSessionState(session);
     });
     return () => {
       disposed = true;
@@ -763,6 +819,50 @@ export default function App() {
       unsubscribeSession?.();
     };
   }, [sessionUserId]);
+
+  useEffect(() => {
+    if (!authReady || !sessionUserId) return;
+
+    let disposed = false;
+    let timer: number | null = null;
+
+    const scheduleNextValidation = (session: DesktopRendererSession | null) => {
+      const expiresAtMs = session?.expiresAt ? session.expiresAt * 1000 : Number.POSITIVE_INFINITY;
+      const timeUntilRefreshWindow = expiresAtMs - Date.now() - 55_000;
+      const delay = Number.isFinite(timeUntilRefreshWindow)
+        ? Math.max(5_000, Math.min(30_000, timeUntilRefreshWindow))
+        : 30_000;
+      timer = window.setTimeout(() => {
+        void validateSession();
+      }, delay);
+    };
+
+    const validateSession = async () => {
+      try {
+        const nextSession =
+          (await window.notebookDesktop?.getAuthSession?.()) ?? getRendererSessionFallback();
+        if (disposed) return;
+        if (!nextSession?.userId) {
+          showSignedOutSplash('Session expired. Sign in again.');
+          return;
+        }
+        syncRendererSessionState(nextSession);
+        scheduleNextValidation(nextSession);
+      } catch {
+        if (!disposed) {
+          scheduleNextValidation(getRendererSessionFallback());
+        }
+      }
+    };
+
+    scheduleNextValidation(getRendererSessionFallback());
+    return () => {
+      disposed = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [authReady, sessionUserId]);
 
   useEffect(() => {
     if (!authReady || !sessionUserId) return;
@@ -829,7 +929,7 @@ export default function App() {
             kind: 'note',
             content_format: 'markdown',
             context_preset: 'custom',
-            context_text: '',
+            context_text: null,
           });
           setNotes([created]);
           setSelectedId(created.frontmatter.id);
@@ -850,14 +950,6 @@ export default function App() {
   }, [connectedProviders, copilotProvider]);
 
   useEffect(() => {
-    if (transcriptionEngine !== 'llm') return;
-    if (connectedProviders.length === 0) return;
-    if (!connectedProviders.includes(llmTranscriptionProvider)) {
-      setLlmTranscriptionProvider(connectedProviders[0]!);
-    }
-  }, [connectedProviders, llmTranscriptionProvider, transcriptionEngine]);
-
-  useEffect(() => {
     if (!authReady || !sessionUserId) return;
     if (!connectedProviders.includes(copilotProvider)) return;
     void loadProviderModels(copilotProvider, 'copilot');
@@ -865,18 +957,13 @@ export default function App() {
 
   useEffect(() => {
     if (!authReady || !sessionUserId) return;
-    if (transcriptionEngine === 'whisper') {
-      if (!connectedProviders.includes('openai')) return;
-    } else if (!connectedProviders.includes(activeTranscriptionProvider)) {
-      return;
-    }
+    if (!connectedProviders.includes('openai')) return;
     void loadProviderModels(activeTranscriptionProvider, 'transcription');
   }, [
     authReady,
     sessionUserId,
     connectedProviders,
     activeTranscriptionProvider,
-    transcriptionEngine,
   ]);
 
   useEffect(() => {
@@ -890,18 +977,6 @@ export default function App() {
   }, [copilotModelOptions, copilotModel]);
 
   useEffect(() => {
-    if (transcriptionEngine !== 'llm') return;
-    if (transcriptionModelOptions.length === 0) {
-      if (llmTranscriptionModel) setLlmTranscriptionModel('');
-      return;
-    }
-    if (!transcriptionModelOptions.some((option) => option.id === llmTranscriptionModel)) {
-      setLlmTranscriptionModel(transcriptionModelOptions[0]!.id);
-    }
-  }, [transcriptionEngine, transcriptionModelOptions, llmTranscriptionModel]);
-
-  useEffect(() => {
-    if (transcriptionEngine !== 'whisper') return;
     if (transcriptionModelOptions.length === 0) {
       if (whisperTranscriptionModel) setWhisperTranscriptionModel('');
       return;
@@ -909,7 +984,7 @@ export default function App() {
     if (!transcriptionModelOptions.some((option) => option.id === whisperTranscriptionModel)) {
       setWhisperTranscriptionModel(transcriptionModelOptions[0]!.id);
     }
-  }, [transcriptionEngine, transcriptionModelOptions, whisperTranscriptionModel]);
+  }, [transcriptionModelOptions, whisperTranscriptionModel]);
 
   useEffect(() => {
     if (!authReady || !sessionUserId) return;
@@ -938,13 +1013,61 @@ export default function App() {
     };
   }, [authReady, sessionUserId, storagePreference.mode]);
 
+  useEffect(() => {
+    if (!authReady || !sessionUserId) return;
+    if (storagePreference.mode !== 'local_and_drive') {
+      lastCompletedSyncRefreshRef.current = null;
+      return;
+    }
 
+    const syncMarker = syncStatus?.last_synced_at ?? null;
+    if (!syncMarker || syncStatus?.state === 'syncing') return;
+    if (lastCompletedSyncRefreshRef.current === syncMarker) return;
+
+    let disposed = false;
+    lastCompletedSyncRefreshRef.current = syncMarker;
+
+    void (async () => {
+      try {
+        const [loadedNotes, loadedFolders] = await Promise.all([
+          fetchNotes(search),
+          fetchFolders().catch(() => []),
+        ]);
+
+        if (disposed) return;
+
+        setNotes(loadedNotes);
+        setFolders(loadedFolders);
+
+        const selectedStillExists = selectedId
+          ? loadedNotes.some((note) => note.frontmatter.id === selectedId)
+          : false;
+        if (!selectedStillExists) {
+          const next = loadedNotes[0] ?? null;
+          setSelectedId(next?.frontmatter.id ?? null);
+          setSelectedFolderId(next?.frontmatter.folder_id ?? null);
+          applyEditorStateFromNote(next);
+        }
+      } catch {
+        lastCompletedSyncRefreshRef.current = null;
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [
+    authReady,
+    search,
+    selectedId,
+    sessionUserId,
+    storagePreference.mode,
+    syncStatus?.last_synced_at,
+    syncStatus?.state,
+  ]);
 
   function clearInterviewSegmentTimer() {
-    if (interviewSegmentTimerRef.current !== null) {
-      window.clearTimeout(interviewSegmentTimerRef.current);
-      interviewSegmentTimerRef.current = null;
-    }
+    /* Interview segmentation now uses recorder timeslices instead of manual rollover timers. */
   }
 
   function buildInterviewSession(
@@ -1014,7 +1137,7 @@ export default function App() {
       tags,
       note_kind: noteKind,
       context_preset: contextPreset,
-      context_text: contextText.trim() || null,
+      context_text: normalizeNullableText(contextText),
       transcript_segments: noteKind === 'transcript' ? transcriptSegmentsRef.current : [],
       summary: noteSummaryRef.current || null,
     };
@@ -1295,235 +1418,6 @@ export default function App() {
     ].join('\n');
   }
 
-  function scheduleInterviewSegmentRollover() {
-    clearInterviewSegmentTimer();
-    interviewSegmentTimerRef.current = window.setTimeout(() => {
-      if (!captureActiveRef.current) return;
-      if (sessionModeRef.current !== 'interview_assist') return;
-      const recorder = recorderRef.current;
-      if (!recorder || recorder.state !== 'recording') return;
-      try {
-        recorder.requestData();
-      } catch {
-        /* ignore */
-      }
-      try {
-        recorder.stop();
-      } catch {
-        /* ignore */
-      }
-    }, INTERVIEW_SEGMENT_MS);
-  }
-
-  function forceInterviewSegmentRollover(statusText: string) {
-    if (!captureActiveRef.current) return;
-    if (sessionModeRef.current !== 'interview_assist') return;
-    const recorder = recorderRef.current;
-    if (!recorder || recorder.state !== 'recording') return;
-
-    setTranscriptionStatus(statusText);
-    try {
-      recorder.requestData();
-    } catch {
-      /* ignore */
-    }
-    try {
-      recorder.stop();
-    } catch {
-      /* ignore */
-    }
-  }
-
-  function attachInterviewRecorderHandlers(
-    recorder: MediaRecorder,
-    transcriptionEngine: TranscriptionEngine,
-  ) {
-    interviewSegmentChunksRef.current = [];
-    recorder.ondataavailable = (event) => {
-      if (!event.data || event.data.size === 0) return;
-      interviewSegmentChunksRef.current.push(event.data);
-    };
-
-    recorder.onstop = () => {
-      clearInterviewSegmentTimer();
-
-      const chunks = interviewSegmentChunksRef.current;
-      interviewSegmentChunksRef.current = [];
-      const mimeType = recorder.mimeType || 'audio/webm';
-      const segmentBlob = chunks.length === 1 ? chunks[0]! : new Blob(chunks, { type: mimeType });
-      if (segmentBlob.size > 0) {
-        const segmentId = nextInterviewSegmentIdRef.current;
-        nextInterviewSegmentIdRef.current += 1;
-        interviewSegmentQueueRef.current.push({ segmentId, blob: segmentBlob });
-        if (interviewSegmentQueueRef.current.length > 24) {
-          interviewSegmentQueueRef.current.shift();
-        }
-        void processInterviewSegmentQueue(transcriptionEngine);
-      }
-
-      if (!captureActiveRef.current || sessionModeRef.current !== 'interview_assist') return;
-      const stream = audioStreamRef.current;
-      if (!stream) return;
-
-      const nextRecorder = buildAudioRecorder(stream);
-      recorderRef.current = nextRecorder;
-      attachInterviewRecorderHandlers(nextRecorder, transcriptionEngine);
-      nextRecorder.start();
-      scheduleInterviewSegmentRollover();
-      setTranscriptionStatus('Listening...');
-    };
-  }
-
-  async function processInterviewSegmentQueue(transcriptionEngine: TranscriptionEngine) {
-    if (interviewSegmentProcessingRef.current) return;
-    interviewSegmentProcessingRef.current = true;
-    try {
-      while (interviewSegmentQueueRef.current.length > 0) {
-        const nextSegment = interviewSegmentQueueRef.current.shift();
-        if (!nextSegment) continue;
-        await refreshInterviewAssist(nextSegment.blob, transcriptionEngine, nextSegment.segmentId);
-      }
-    } finally {
-      interviewSegmentProcessingRef.current = false;
-    }
-  }
-
-  async function refreshInterviewAssist(
-    mergedAudio: Blob,
-    transcriptionEngine: TranscriptionEngine,
-    segmentId?: number,
-  ) {
-    if (sessionModeRef.current !== 'interview_assist') return;
-    if (interviewUpdateInFlightRef.current) return;
-    if (mergedAudio.size === 0) return;
-    if (!connectedProviders.includes(copilotProvider)) {
-      setTranscriptionStatus('Connect an AI provider in Settings to use Interview Assist.');
-      return;
-    }
-    if (transcriptionEngine === 'llm' && !connectedProviders.includes(llmTranscriptionProvider)) {
-      setTranscriptionStatus('Connect a provider in Settings to use Detailed transcription.');
-      return;
-    }
-
-    interviewUpdateInFlightRef.current = true;
-    setTranscriptionBusy(true);
-
-    try {
-      const result = await transcribeAudioChunk(
-        mergedAudio,
-        activeTranscriptionProvider,
-        transcriptionEngine,
-        segmentId,
-        activeTranscriptionModel || undefined,
-        {
-          contextPreset,
-          contextText,
-          sourceHint: activeSessionMode === 'interview_assist' ? 'unknown' : null,
-        },
-      );
-      if (!result.ok) {
-        const recoverableFailure = Boolean(result.recoverable);
-        const detail =
-          result.detail?.trim() ||
-          'Transcription failed.';
-        setTranscriptionStatus(detail);
-
-        if (
-          recoverableFailure &&
-          transcriptionEngine === 'whisper' &&
-          sessionModeRef.current === 'interview_assist'
-        ) {
-          interviewRecoverableFailureCountRef.current += 1;
-          if (interviewRecoverableFailureCountRef.current >= INTERVIEW_RECOVERABLE_FAILURE_LIMIT) {
-            interviewRecoverableFailureCountRef.current = 0;
-            forceInterviewSegmentRollover('Recovering audio capture...');
-          }
-        } else {
-          interviewRecoverableFailureCountRef.current = 0;
-        }
-        return;
-      }
-
-      const chunkTranscript = result.text.trim();
-      if (!chunkTranscript) {
-        interviewRecoverableFailureCountRef.current = 0;
-        setTranscriptionStatus(result.detail?.trim() || 'Listening...');
-        return;
-      }
-      interviewRecoverableFailureCountRef.current = 0;
-
-      const nextTranscript = mergeTranscriptText(interviewTranscriptRef.current, chunkTranscript);
-      if (!nextTranscript || nextTranscript === interviewTranscriptRef.current) {
-        setTranscriptionStatus('Listening...');
-        return;
-      }
-      const transcriptForTurnExtraction = nextTranscript.slice(-INTERVIEW_TRANSCRIPT_TAIL_CHARS);
-
-      const turnPayload = await fetchInterviewTurns({
-        transcript: transcriptForTurnExtraction,
-        previous_turns: interviewTurnsRef.current,
-        provider: copilotProvider,
-        model: copilotModel || undefined,
-      });
-      if (turnPayload.transcript_digest === interviewDigestRef.current) {
-        setTranscriptionStatus('Listening...');
-        return;
-      }
-
-      interviewDigestRef.current = turnPayload.transcript_digest;
-      interviewTranscriptRef.current = nextTranscript;
-      interviewTurnsRef.current = turnPayload.turns;
-      setInterviewTranscript(nextTranscript);
-      setInterviewTurns(turnPayload.turns);
-      setBody(nextTranscript);
-      setTranscriptionStatus('Listening...');
-
-      const interviewerTurn = selectCoachTargetTurn(turnPayload.turns, nextTranscript);
-      if (!interviewerTurn) {
-        setTranscriptionStatus('Listening... waiting for a clear interviewer question.');
-        return;
-      }
-      if (interviewerTurn.id === lastCoachedInterviewerTurnIdRef.current) return;
-      const latestIntervieweeTurn = latestTurn('interviewee', turnPayload.turns);
-
-      const coachRequestId = coachInFlightRequestIdRef.current + 1;
-      coachInFlightRequestIdRef.current = coachRequestId;
-      setInterviewGuidanceBusy(true);
-      let coachDraft = '';
-
-      await streamInterviewCoach(
-        {
-          latest_interviewer_turn: interviewerTurn,
-          latest_interviewee_turn: latestIntervieweeTurn,
-          brevity: 'short',
-          provider: copilotProvider,
-          model: copilotModel || undefined,
-        },
-        (token) => {
-          if (coachRequestId !== coachInFlightRequestIdRef.current) return;
-          coachDraft += token;
-          setInterviewGuidance(coachDraft);
-        },
-      );
-
-      if (coachRequestId !== coachInFlightRequestIdRef.current) return;
-      const normalizedCoach =
-        normalizeCoachText(coachDraft, 3) ||
-        buildCoachFallback(interviewerTurn, latestIntervieweeTurn, 3);
-      lastCoachedInterviewerTurnIdRef.current = interviewerTurn.id;
-      setInterviewGuidance(normalizedCoach);
-      setBody(nextTranscript);
-    } catch (error) {
-      setTranscriptionStatus(
-        error instanceof Error ? error.message : 'Interview guidance refresh failed.',
-      );
-    } finally {
-      interviewUpdateInFlightRef.current = false;
-      setTranscriptionBusy(false);
-      setInterviewGuidanceBusy(false);
-    }
-  }
-
   async function regenerateCoach(brevity: 'short' | 'one_liner') {
     if (!connectedProviders.includes(copilotProvider)) {
       setMessage('Connect an AI provider in Settings to use Interview Assist.');
@@ -1583,6 +1477,7 @@ export default function App() {
 
   useEffect(() => {
     applyEditorStateFromNote(selectedNote);
+    setEditorStatusMessage('Saved');
   }, [selectedNote?.frontmatter.id]);
 
   useEffect(() => {
@@ -1599,6 +1494,7 @@ export default function App() {
       const current = notes.find((note) => note.frontmatter.id === selectedId);
       if (!current) return;
 
+      const normalizedContextText = normalizeNullableText(contextText);
       const payload = {
         id: selectedId,
         title: title.trim() || 'Untitled note',
@@ -1607,7 +1503,7 @@ export default function App() {
         kind: noteKind,
         content_format: contentFormat,
         context_preset: contextPreset,
-        context_text: contextText.trim() || null,
+        context_text: normalizedContextText,
         session:
           noteKind === 'interview_assist'
             ? buildInterviewSession(
@@ -1628,7 +1524,7 @@ export default function App() {
         current.content_format === payload.content_format &&
         current.frontmatter.tags.join('|') === payload.tags.join('|') &&
         (current.frontmatter.context_preset ?? null) === payload.context_preset &&
-        (current.frontmatter.context_text ?? null) === payload.context_text &&
+        normalizeNullableText(current.frontmatter.context_text) === payload.context_text &&
         serializeExistingSessionForCompare(current.session ?? null) ===
           serializeSessionForCompare(noteKind, body);
 
@@ -1639,10 +1535,13 @@ export default function App() {
       void updateNote(payload)
         .then((updated) => {
           setNotes((prev) => prev.map((note) => (note.frontmatter.id === updated.frontmatter.id ? updated : note)));
+          setEditorStatusMessage('Saved');
           setMessage('Saved');
         })
         .catch((error) => {
-          setMessage(error instanceof Error ? error.message : 'Save failed');
+          const saveErrorMessage = error instanceof Error ? error.message : 'Save failed';
+          setEditorStatusMessage(saveErrorMessage);
+          setMessage(saveErrorMessage);
         })
         .finally(() => {
           setSaving(false);
@@ -1677,7 +1576,7 @@ export default function App() {
         content_format: 'markdown',
         folder_id: selectedFolderId,
         context_preset: contextPreset,
-        context_text: contextText.trim() || null,
+        context_text: normalizeNullableText(contextText),
       });
 
       setNotes((prev) => [created, ...prev]);
@@ -1691,12 +1590,20 @@ export default function App() {
   }
 
   function handleSelectNote(noteId: string) {
+    if (recording || transcriptionBusy) {
+      setMessage('Finish recording before switching notes.');
+      return;
+    }
     const note = notes.find((entry) => entry.frontmatter.id === noteId) ?? null;
     setSelectedId(noteId);
     setSelectedFolderId(note?.frontmatter.folder_id ?? null);
   }
 
   function handleSelectFolder(folderId: string | null) {
+    if (recording || transcriptionBusy) {
+      setMessage('Finish recording before switching folders.');
+      return;
+    }
     setSelectedFolderId(folderId);
     setSelectedId(null);
     applyEditorStateFromNote(null);
@@ -2470,9 +2377,6 @@ export default function App() {
     for (const track of captureStreamRef.current?.getTracks() ?? []) {
       track.stop();
     }
-    for (const track of audioStreamRef.current?.getTracks() ?? []) {
-      track.stop();
-    }
     for (const track of micStreamRef.current?.getTracks() ?? []) {
       track.stop();
     }
@@ -2480,101 +2384,243 @@ export default function App() {
       void audioContextRef.current.close();
     }
     captureStreamRef.current = null;
-    audioStreamRef.current = null;
     micStreamRef.current = null;
     micGainNodeRef.current = null;
     audioContextRef.current = null;
-    recorderRef.current = null;
+    sourceRecorderHandlesRef.current = [];
+    captureSessionIdRef.current = null;
+    captureSessionStatusRef.current = null;
+    captureNoteIdRef.current = null;
+    captureStopRequestedRef.current = false;
+    captureFinalizeInFlightRef.current = false;
+    recordingStartedAtRef.current = null;
   }
 
   function stopRecording() {
+    if (captureStopRequestedRef.current) return;
+    captureStopRequestedRef.current = true;
     clearInterviewSegmentTimer();
     captureActiveRef.current = false;
-    interviewSegmentQueueRef.current = [];
     coachInFlightRequestIdRef.current += 1;
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state === 'recording') {
-      try {
-        recorder.requestData();
-      } catch {
-        /* ignore */
-      }
+    for (const handle of sourceRecorderHandlesRef.current) {
+      void handle.stop();
     }
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stop();
-    }
-    stopCaptureTracks();
     setRecording(false);
-    setTranscriptionStatus('Capture stopped');
+    setCapturePhase('stopping');
     setInterviewGuidanceBusy(false);
-    setTranscriptionBusy(false);
+    setTranscriptionBusy(true);
+    const sessionId = captureSessionIdRef.current;
+    if (!sessionId) {
+      stopCaptureTracks();
+      setTranscriptionBusy(false);
+      setCapturePhase('idle');
+      return;
+    }
+    void finalizeActiveCaptureSession(sessionId);
   }
 
-  function buildAudioRecorder(inputStream: MediaStream): MediaRecorder {
-    const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
-    const selectedMime = preferred.find(
-      (candidate) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(candidate),
-    );
-    return selectedMime
-      ? new MediaRecorder(inputStream, { mimeType: selectedMime })
-      : new MediaRecorder(inputStream);
+  async function applyInterviewTranscriptUpdate(nextTranscript: string) {
+    if (sessionModeRef.current !== 'interview_assist') return;
+    if (interviewUpdateInFlightRef.current) return;
+    const normalizedTranscript = nextTranscript.trim();
+    if (!normalizedTranscript) return;
+    if (!connectedProviders.includes(copilotProvider)) {
+      setCaptureWarning('Connect an AI provider in Settings to use Interview Assist.');
+      return;
+    }
+
+    interviewUpdateInFlightRef.current = true;
+    setInterviewGuidanceBusy(true);
+
+    try {
+      if (normalizedTranscript === interviewTranscriptRef.current.trim()) {
+        return;
+      }
+
+      const transcriptForTurnExtraction = normalizedTranscript.slice(-INTERVIEW_TRANSCRIPT_TAIL_CHARS);
+      const turnPayload = await fetchInterviewTurns({
+        transcript: transcriptForTurnExtraction,
+        previous_turns: interviewTurnsRef.current,
+        provider: copilotProvider,
+        model: copilotModel || undefined,
+      });
+      if (turnPayload.transcript_digest === interviewDigestRef.current) {
+        interviewTranscriptRef.current = normalizedTranscript;
+        setInterviewTranscript(normalizedTranscript);
+        setBody(normalizedTranscript);
+        return;
+      }
+
+      interviewDigestRef.current = turnPayload.transcript_digest;
+      interviewTranscriptRef.current = normalizedTranscript;
+      interviewTurnsRef.current = turnPayload.turns;
+      setInterviewTranscript(normalizedTranscript);
+      setInterviewTurns(turnPayload.turns);
+      setBody(normalizedTranscript);
+
+      const interviewerTurn = selectCoachTargetTurn(turnPayload.turns, normalizedTranscript);
+      if (!interviewerTurn) {
+        return;
+      }
+      if (interviewerTurn.id === lastCoachedInterviewerTurnIdRef.current) return;
+      const latestIntervieweeTurn = latestTurn('interviewee', turnPayload.turns);
+
+      const coachRequestId = coachInFlightRequestIdRef.current + 1;
+      coachInFlightRequestIdRef.current = coachRequestId;
+      let coachDraft = '';
+
+      await streamInterviewCoach(
+        {
+          latest_interviewer_turn: interviewerTurn,
+          latest_interviewee_turn: latestIntervieweeTurn,
+          brevity: 'short',
+          provider: copilotProvider,
+          model: copilotModel || undefined,
+        },
+        (token) => {
+          if (coachRequestId !== coachInFlightRequestIdRef.current) return;
+          coachDraft += token;
+          setInterviewGuidance(coachDraft);
+        },
+      );
+
+      if (coachRequestId !== coachInFlightRequestIdRef.current) return;
+      const normalizedCoach =
+        normalizeCoachText(coachDraft, 3) ||
+        buildCoachFallback(interviewerTurn, latestIntervieweeTurn, 3);
+      lastCoachedInterviewerTurnIdRef.current = interviewerTurn.id;
+      interviewGuidanceRef.current = normalizedCoach;
+      setInterviewGuidance(normalizedCoach);
+    } catch (error) {
+      setCaptureWarning(
+        error instanceof Error ? error.message : 'Interview guidance refresh failed.',
+      );
+    } finally {
+      interviewUpdateInFlightRef.current = false;
+      setInterviewGuidanceBusy(false);
+    }
   }
 
-  function createSourceRecorderHandle(
-    sourceHint: Extract<SourceHint, 'me' | 'other_audio'>,
-    inputStream: MediaStream,
-  ): SourceRecorderHandle {
-    const recorder = buildAudioRecorder(inputStream);
-    const chunks: Blob[] = [];
-    let resolveDone: ((blob: Blob) => void) | null = null;
-    const done = new Promise<Blob>((resolve) => {
-      resolveDone = resolve;
+  async function createSessionCaptureHandle(
+    sessionId: string,
+    sessionMode: CaptureSessionMode,
+    audioContext: AudioContext,
+    sourceHint: SourceHint,
+    inputNode: AudioNode,
+  ): Promise<SourceRecorderHandle> {
+    let nextChunkIndex = 0;
+    const captureHandle: LiveCaptureHandle = await createLiveCaptureHandle({
+      audioContext,
+      inputNode,
+      sourceHint,
+      chunkDurationMs: CAPTURE_CHUNK_MS,
+      onChunk: async (chunk: LiveCaptureChunk) => {
+        const chunkIndex = nextChunkIndex;
+        nextChunkIndex += 1;
+        const ack = await appendCaptureSessionChunk(sessionId, chunk.blob, chunkIndex, {
+          sourceHint,
+          startedAtMs: chunk.startedAtMs,
+          durationMs: chunk.durationMs,
+        });
+        captureSessionStatusRef.current = ack;
+        if (sourceHint !== 'unknown') return;
+
+        if (ack.recoverable_error) {
+          setCaptureWarning((prev) => prev ?? 'Some chunks need retry. Recording continues.');
+        }
+
+        if (sessionMode === 'interview_assist') {
+          await applyInterviewTranscriptUpdate(ack.transcript);
+        } else if (ack.transcript.trim()) {
+          setBody(ack.transcript);
+        }
+      },
+      onError: (error) => {
+        setCaptureWarning(
+          error instanceof Error ? error.message : 'Unable to process captured audio chunk.',
+        );
+      },
     });
 
-    recorder.ondataavailable = (event) => {
-      if (!event.data || event.data.size === 0) return;
-      chunks.push(event.data);
+    return {
+      sourceHint,
+      stopped: captureHandle.stopped,
+      stop: captureHandle.stop,
     };
-    recorder.onstop = () => {
-      const mimeType = recorder.mimeType || 'audio/webm';
-      const blob = chunks.length <= 1 ? chunks[0] ?? new Blob([], { type: mimeType }) : new Blob(chunks, { type: mimeType });
-      resolveDone?.(blob);
-    };
+  }
 
-    return { sourceHint, recorder, chunks, done };
+  async function finalizeActiveCaptureSession(sessionId: string) {
+    if (captureFinalizeInFlightRef.current) return;
+    captureFinalizeInFlightRef.current = true;
+    const captureNoteId = captureNoteIdRef.current;
+    try {
+      setCapturePhase('finalizing_local');
+      const stopPromises = sourceRecorderHandlesRef.current.map((handle) => handle.stopped);
+      await Promise.all(stopPromises);
+
+      setCapturePhase('transcribing');
+      let finalized = await finalizeCaptureSession(sessionId);
+      if (finalized.state === 'retry_needed') {
+        setCapturePhase('retry_needed');
+        finalized = await retryCaptureSessionRecovery(sessionId);
+      }
+
+      captureSessionStatusRef.current = finalized;
+      if (finalized.segments.length > 0) {
+        setTranscriptSegments(finalized.segments);
+      } else {
+        setTranscriptSegments([]);
+      }
+
+      if (sessionModeRef.current === 'interview_assist') {
+        await applyInterviewTranscriptUpdate(finalized.transcript);
+      } else {
+        setBody(finalized.transcript);
+      }
+
+      if (finalized.state === 'completed') {
+        setCaptureWarning(null);
+        setCapturePhase('ready');
+      } else if (finalized.state === 'retry_needed') {
+        setCaptureWarning(finalized.detail ?? 'Retry needed for one or more audio chunks.');
+        setCapturePhase('retry_needed');
+      } else {
+        throw new Error(finalized.detail || 'Unable to finalize capture session.');
+      }
+    } catch (error) {
+      setCaptureWarning(error instanceof Error ? error.message : 'Unable to finalize capture session.');
+      setCapturePhase('retry_needed');
+    } finally {
+      stopCaptureTracks();
+      setTranscriptionBusy(false);
+      captureFinalizeInFlightRef.current = false;
+      autoEnhanceNoteIdRef.current = captureSessionStatusRef.current?.note_id ?? captureNoteId ?? selectedId;
+    }
   }
 
   async function beginTranscriptionSession(
-    recorder: MediaRecorder,
     options: {
-      listeningStatus: string;
-      shareStream: MediaStream | null;
-      transcriptionEngine: TranscriptionEngine;
       sessionMode: CaptureSessionMode;
-      sourceRecorderHandles?: SourceRecorderHandle[];
-      mixedSources?: boolean;
+      captureMode: CaptureMode;
+      stopTriggerTrack: MediaStreamTrack | null;
+      createSourceRecorderHandles: (
+        sessionId: string,
+        sessionMode: CaptureSessionMode,
+      ) => Promise<SourceRecorderHandle[]>;
     },
   ) {
     const {
-      listeningStatus,
-      shareStream,
-      transcriptionEngine,
       sessionMode,
-      sourceRecorderHandles = [],
-      mixedSources = false,
+      captureMode,
+      stopTriggerTrack,
+      createSourceRecorderHandles,
     } = options;
 
-    recorderRef.current = recorder;
-    transcriptionEngineSessionRef.current = transcriptionEngine;
     sessionModeRef.current = sessionMode;
     captureActiveRef.current = true;
     setActiveSessionMode(sessionMode);
-    recordedAudioChunksRef.current = [];
-    interviewSegmentQueueRef.current = [];
-    interviewSegmentProcessingRef.current = false;
-    interviewSegmentChunksRef.current = [];
-    nextInterviewSegmentIdRef.current = 1;
-    interviewRecoverableFailureCountRef.current = 0;
+    captureStopRequestedRef.current = false;
+    captureFinalizeInFlightRef.current = false;
     interviewTranscriptRef.current = '';
     interviewTurnsRef.current = [];
     interviewDigestRef.current = '';
@@ -2589,20 +2635,23 @@ export default function App() {
     setInterviewGuidance('');
     setInterviewGuidanceBusy(false);
     setTranscriptSegments([]);
+    setBody('');
+    setCaptureWarning(null);
+    recordingStartedAtRef.current = Date.now();
+    setRecordingElapsedMs(0);
 
     const transcriptTitle =
       sessionMode === 'interview_assist'
         ? `Interview Assist ${new Date().toLocaleTimeString()}`
         : `Transcript ${new Date().toLocaleTimeString()}`;
-    const initialBody = '';
     const created = await createNote({
       title: transcriptTitle,
-      content: initialBody,
+      content: '',
       tags: sessionMode === 'interview_assist' ? ['interview-assist', 'transcript'] : ['transcript'],
       kind: sessionMode === 'interview_assist' ? 'interview_assist' : 'transcript',
       content_format: 'plain_text',
       context_preset: contextPreset,
-      context_text: contextText.trim() || null,
+      context_text: normalizeNullableText(contextText),
       session:
         sessionMode === 'interview_assist'
           ? buildInterviewSession('', '', [])
@@ -2612,180 +2661,51 @@ export default function App() {
     setSelectedId(created.frontmatter.id);
     applyEditorStateFromNote(created);
     autoEnhanceNoteIdRef.current = created.frontmatter.id;
+    captureNoteIdRef.current = created.frontmatter.id;
 
-    setRecording(true);
-    setTranscriptionStatus(listeningStatus);
-
-    const appendTranscriptChunk = (chunkText: string) => {
-      const normalized = chunkText.trim();
-      if (!normalized) return;
-
-      setBody((prev) => `${prev}${prev.trim().length === 0 ? '' : ' '}${normalized}`);
+    const capturePayload: CaptureSessionStartRequest = {
+      note_id: created.frontmatter.id,
+      session_mode: sessionMode,
+      capture_mode: captureMode,
+      provider: activeTranscriptionProvider,
+      transcription_mode: 'whisper',
+      model: activeTranscriptionModel || undefined,
+      context_preset: contextPreset,
+      context_text: normalizeNullableText(contextText),
     };
-    if (sessionMode === 'interview_assist') {
-      attachInterviewRecorderHandlers(recorder, transcriptionEngine);
-    } else {
-      recorder.ondataavailable = (event) => {
-        if (!event.data || event.data.size === 0) return;
-        recordedAudioChunksRef.current.push(event.data);
-      };
+    const captureSession = await startCaptureSession(capturePayload);
+    captureSessionIdRef.current = captureSession.session_id;
+    captureSessionStatusRef.current = captureSession;
 
-      recorder.onstop = () => {
-        setRecording(false);
-        clearInterviewSegmentTimer();
-        const chunks = recordedAudioChunksRef.current;
-        recordedAudioChunksRef.current = [];
-        const mimeType = recorder.mimeType || 'audio/webm';
-        const merged = chunks.length === 1 ? chunks[0]! : new Blob(chunks, { type: mimeType });
-
-        if (merged.size === 0) {
-          setTranscriptionStatus('No audio captured.');
-          return;
-        }
-        if (transcriptionEngine === 'llm' && !connectedProviders.includes(llmTranscriptionProvider)) {
-          setTranscriptionStatus('Connect a provider in Settings to use Detailed transcription.');
-          return;
-        }
-
-        setTranscriptionBusy(true);
-        setTranscriptionStatus(
-          'Finalizing transcript...',
-        );
-
-        for (const handle of sourceRecorderHandles) {
-          if (handle.recorder.state === 'recording') {
-            try {
-              handle.recorder.requestData();
-            } catch {
-              /* ignore */
-            }
-            handle.recorder.stop();
-          }
-        }
-
-        void transcribeAudioChunk(
-          merged,
-          activeTranscriptionProvider,
-          transcriptionEngine,
-          undefined,
-          activeTranscriptionModel || undefined,
-          {
-            contextPreset: contextPreset,
-            contextText,
-            sourceHint:
-              sourceRecorderHandles.length === 0
-                ? (mixedSources ? 'unknown' : shareStream ? 'other_audio' : 'me')
-                : 'unknown',
-          },
-        )
-          .then(async (result) => {
-            let nextSegments: TranscriptSegment[] = [];
-            if (sourceRecorderHandles.length > 0) {
-              const segmentResults = await Promise.all(
-                sourceRecorderHandles.map(async (handle, index) => {
-                  const sourceBlob = await handle.done;
-                  if (sourceBlob.size === 0) return null;
-                  const sourceResult = await transcribeAudioChunk(
-                    sourceBlob,
-                    activeTranscriptionProvider,
-                    transcriptionEngine,
-                    undefined,
-                    activeTranscriptionModel || undefined,
-                    {
-                      contextPreset,
-                      contextText,
-                      sourceHint: handle.sourceHint,
-                    },
-                  );
-                  const text = sourceResult.text.trim();
-                  if (!text) return null;
-                  return {
-                    id: `segment-${index + 1}-${handle.sourceHint}`,
-                    text,
-                    source_hint: handle.sourceHint,
-                  } satisfies TranscriptSegment;
-                }),
-              );
-              nextSegments = segmentResults.filter(
-                (segment): segment is NonNullable<typeof segment> => segment !== null,
-              );
-            } else if (mixedSources && result.text.trim()) {
-              nextSegments = [
-                {
-                  id: 'segment-1',
-                  text: result.text.trim(),
-                  source_hint: shareStream ? 'other_audio' : 'me',
-                },
-              ];
-            }
-
-            if (nextSegments.length > 0) {
-              const transcriptText =
-                result.text.trim() || nextSegments.map((segment) => segment.text.trim()).filter(Boolean).join('\n\n');
-              setTranscriptSegments(nextSegments);
-              setBody(transcriptText);
-              setTranscriptionStatus('Transcript ready.');
-              return;
-            }
-
-            if (result.text.trim()) {
-              appendTranscriptChunk(result.text);
-              setTranscriptionStatus('Transcript ready.');
-            } else if (result.detail) {
-              setTranscriptionStatus(result.detail);
-            } else {
-              setTranscriptionStatus(
-                transcriptionEngine === 'llm'
-                  ? 'Detailed mode returned no text for this recording.'
-                  : 'Fast mode returned no text for this recording.',
-              );
-            }
-          })
-          .catch((error: unknown) => {
-            setTranscriptionStatus(
-              error instanceof Error
-                ? error.message
-                : transcriptionEngine === 'llm'
-                  ? 'Detailed transcription failed.'
-                  : 'Fast transcription failed.',
-            );
-          })
-          .finally(() => {
-            setTranscriptionBusy(false);
-          });
-      };
+    const sourceRecorderHandles = await createSourceRecorderHandles(
+      captureSession.session_id,
+      sessionMode,
+    );
+    if (!sourceRecorderHandles.some((handle) => handle.sourceHint === 'unknown')) {
+      throw new Error('Canonical audio capture could not be started.');
     }
+    sourceRecorderHandlesRef.current = sourceRecorderHandles;
 
     const endOnStop = () => {
       stopRecording();
     };
 
-    const videoTrack = shareStream?.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.addEventListener('ended', endOnStop);
-    } else {
-      const micTrack = recorder.stream.getAudioTracks()[0];
-      micTrack?.addEventListener('ended', endOnStop);
-    }
+    stopTriggerTrack?.addEventListener('ended', endOnStop);
 
-    for (const handle of sourceRecorderHandles) {
-      handle.recorder.start();
-    }
-    recorder.start();
-    if (sessionMode === 'interview_assist') {
-      scheduleInterviewSegmentRollover();
-    }
+    setRecording(true);
+    setCapturePhase('recording');
   }
 
   async function startRecording(
     mode: CaptureMode,
-    transcriptionEngine: TranscriptionEngine,
     sessionMode: CaptureSessionMode,
   ) {
     if (recording) return;
+    setCapturePhase('requesting_permissions');
+    setCaptureWarning(null);
+    setTranscriptionBusy(true);
 
     if (mode === 'mic') {
-      setTranscriptionStatus('Requesting microphone permission...');
       try {
         const micStream = await navigator.mediaDevices.getUserMedia({
           audio: true,
@@ -2800,40 +2720,39 @@ export default function App() {
         micStreamRef.current = micStream;
         const audioContext = new AudioContext();
         await audioContext.resume();
-        const destination = audioContext.createMediaStreamDestination();
         const micSource = audioContext.createMediaStreamSource(micStream);
         const micGain = audioContext.createGain();
+        const canonicalTapBus = audioContext.createGain();
         micGain.gain.value = candidateMutedRef.current ? 0 : 1;
         micSource.connect(micGain);
-        micGain.connect(destination);
-
-        audioStreamRef.current = destination.stream;
+        micGain.connect(canonicalTapBus);
         audioContextRef.current = audioContext;
         micGainNodeRef.current = micGain;
 
-        const recorder = buildAudioRecorder(destination.stream);
-        await beginTranscriptionSession(recorder, {
-          listeningStatus:
-            sessionMode === 'interview_assist'
-              ? 'Interview Assist: listening to microphone...'
-              : 'Listening to microphone...',
-          shareStream: null,
-          transcriptionEngine,
+        await beginTranscriptionSession({
           sessionMode,
-          mixedSources: false,
+          captureMode: 'mic',
+          stopTriggerTrack: micStream.getAudioTracks()[0] ?? null,
+          createSourceRecorderHandles: async (sessionId, activeSessionMode) => [
+            await createSessionCaptureHandle(
+              sessionId,
+              activeSessionMode,
+              audioContext,
+              'unknown',
+              canonicalTapBus,
+            ),
+          ],
         });
+        setTranscriptionBusy(false);
       } catch (error) {
         stopCaptureTracks();
         setRecording(false);
         setTranscriptionBusy(false);
-        setTranscriptionStatus(
-          error instanceof Error ? error.message : 'Unable to start microphone capture.',
-        );
+        setCaptureWarning(error instanceof Error ? error.message : 'Unable to start microphone capture.');
+        setCapturePhase('idle');
       }
       return;
     }
-
-    setTranscriptionStatus('Requesting screen/audio permission...');
 
     try {
       const captureStream = await navigator.mediaDevices.getDisplayMedia({
@@ -2863,58 +2782,77 @@ export default function App() {
 
       const audioContext = new AudioContext();
       await audioContext.resume();
-      const destination = audioContext.createMediaStreamDestination();
-
       const systemSource = audioContext.createMediaStreamSource(systemAudioStream);
-      systemSource.connect(destination);
+      const canonicalTapBus = audioContext.createGain();
+      systemSource.connect(canonicalTapBus);
 
+      let micSource: MediaStreamAudioSourceNode | null = null;
       let micGainNode: GainNode | null = null;
       if (micStream && micEnabled) {
-        const micSource = audioContext.createMediaStreamSource(micStream);
+        micSource = audioContext.createMediaStreamSource(micStream);
         micGainNode = audioContext.createGain();
         micGainNode.gain.value = candidateMutedRef.current ? 0 : 1;
         micSource.connect(micGainNode);
-        micGainNode.connect(destination);
+        micGainNode.connect(canonicalTapBus);
       }
 
-      const mixedAudioStream = destination.stream;
-      const sourceRecorderHandles: SourceRecorderHandle[] =
-        sessionMode === 'notes' && micEnabled
-          ? [
-              createSourceRecorderHandle('other_audio', systemAudioStream),
-              ...(micStream ? [createSourceRecorderHandle('me', micStream)] : []),
-            ]
-          : [];
-
       captureStreamRef.current = captureStream;
-      audioStreamRef.current = mixedAudioStream;
       micStreamRef.current = micStream;
       audioContextRef.current = audioContext;
       micGainNodeRef.current = micGainNode;
 
-      const recorder = buildAudioRecorder(mixedAudioStream);
-      await beginTranscriptionSession(recorder, {
-        listeningStatus:
-          sessionMode === 'interview_assist'
-            ? micEnabled
-              ? 'Interview Assist: listening to system audio + microphone...'
-              : 'Interview Assist: listening to system audio...'
-            : micEnabled
-              ? 'Listening to system audio + microphone...'
-              : 'Listening to system audio...',
-        shareStream: captureStream,
-        transcriptionEngine,
+      await beginTranscriptionSession({
         sessionMode,
-        sourceRecorderHandles,
-        mixedSources: micEnabled,
+        captureMode: micEnabled ? 'system_audio_plus_mic' : 'system_audio',
+        stopTriggerTrack:
+          captureStream.getVideoTracks()[0] ?? systemAudioStream.getAudioTracks()[0] ?? null,
+        createSourceRecorderHandles: async (sessionId, activeSessionMode) => {
+          const handles: SourceRecorderHandle[] = [
+            await createSessionCaptureHandle(
+              sessionId,
+              activeSessionMode,
+              audioContext,
+              'unknown',
+              canonicalTapBus,
+            ),
+          ];
+
+          if (activeSessionMode === 'notes' && micEnabled) {
+            handles.push(
+              await createSessionCaptureHandle(
+                sessionId,
+                activeSessionMode,
+                audioContext,
+                'other_audio',
+                systemSource,
+              ),
+            );
+            if (micSource) {
+              handles.push(
+                await createSessionCaptureHandle(
+                  sessionId,
+                  activeSessionMode,
+                  audioContext,
+                  'me',
+                  micSource,
+                ),
+              );
+            }
+          }
+
+          return handles;
+        },
       });
+      setTranscriptionBusy(false);
+      if (!micEnabled) {
+        setCaptureWarning('Microphone unavailable. Continuing with system audio only.');
+      }
     } catch (error) {
       stopCaptureTracks();
       setRecording(false);
       setTranscriptionBusy(false);
-      setTranscriptionStatus(
-        error instanceof Error ? error.message : 'Unable to start system audio capture.',
-      );
+      setCaptureWarning(error instanceof Error ? error.message : 'Unable to start system audio capture.');
+      setCapturePhase('idle');
     }
   }
 
@@ -3081,7 +3019,7 @@ export default function App() {
                   </button>
                 ) : null}
               </div>
-              <span className="status-pill">{saving ? 'Saving...' : message}</span>
+              <span className="status-pill">{saving ? 'Saving...' : editorStatusMessage}</span>
             </div>
           </header>
         ) : !selectedNote ? (
@@ -3156,10 +3094,12 @@ export default function App() {
               recording={recording}
               busy={transcriptionBusy}
               status={transcriptionStatus}
+              elapsedMs={recordingElapsedMs}
+              warning={captureWarning}
               contextPreset={contextPreset}
               contextText={contextText}
               onStart={(opts) => {
-                void startRecording(opts.captureMode, transcriptionEngine, opts.mode);
+                void startRecording(opts.captureMode, opts.mode);
               }}
               onStop={stopRecording}
               onModeChange={setActiveSessionMode}
@@ -3210,11 +3150,17 @@ export default function App() {
                   {candidateMuted ? 'Unmute Mic' : 'Mute My Mic'}
                 </button>
                 <span className="status-pill">{candidateMuted ? 'Muted (M)' : 'Live mic (M)'}</span>
-                <span className="status-pill">
-                  {recording ? (interviewGuidanceBusy ? 'Coach thinking' : 'Live') : 'Idle'}
-                </span>
+                <span className="status-pill">{recording ? `Recording ${formatElapsedMs(recordingElapsedMs)}` : transcriptionStatus}</span>
+                <span className="status-pill">{recording ? (interviewGuidanceBusy ? 'Coach thinking' : 'Live') : 'Idle'}</span>
               </div>
             </header>
+
+            {captureWarning ? (
+              <div className="transcription-status-bar">
+                <span className="status-dot" />
+                <span className="status-text">{captureWarning}</span>
+              </div>
+            ) : null}
 
             <article className="teleprompter-card teleprompter-sticky">
               <div className="teleprompter-header">
@@ -3306,7 +3252,6 @@ export default function App() {
             contextPreset={contextPreset}
             contextText={contextText}
             connectedProviders={connectedProviders}
-            transcriptionEngine={transcriptionEngine}
             transcriptionProvider={activeTranscriptionProvider}
             transcriptionModel={activeTranscriptionModel}
             transcriptionModels={transcriptionModelOptions}
@@ -3317,15 +3262,7 @@ export default function App() {
             copilotModels={copilotModelOptions}
             copilotModelsLoading={copilotModelsLoading}
             copilotModelsError={copilotModelsError}
-            onTranscriptionEngineChange={handleTranscriptionEngineChange}
-            onTranscriptionProviderChange={setLlmTranscriptionProvider}
-            onTranscriptionModelChange={(model) => {
-              if (transcriptionEngine === 'whisper') {
-                setWhisperTranscriptionModel(model);
-                return;
-              }
-              setLlmTranscriptionModel(model);
-            }}
+            onTranscriptionModelChange={setWhisperTranscriptionModel}
             onCopilotProviderChange={setCopilotProvider}
             onCopilotModelChange={setCopilotModel}
             onTabChange={setTranscriptViewTab}
@@ -3471,21 +3408,12 @@ export default function App() {
         onRefreshDriveStatus={() => {
           void handleRefreshDriveStatus();
         }}
-        transcriptionEngine={transcriptionEngine}
         transcriptionProvider={activeTranscriptionProvider}
         transcriptionModel={activeTranscriptionModel}
         transcriptionModels={transcriptionModelOptions}
         transcriptionModelsLoading={transcriptionModelsLoading}
         transcriptionModelsError={transcriptionModelsError}
-        onTranscriptionEngineChange={handleTranscriptionEngineChange}
-        onTranscriptionProviderChange={setLlmTranscriptionProvider}
-        onTranscriptionModelChange={(model) => {
-          if (transcriptionEngine === 'whisper') {
-            setWhisperTranscriptionModel(model);
-            return;
-          }
-          setLlmTranscriptionModel(model);
-        }}
+        onTranscriptionModelChange={setWhisperTranscriptionModel}
         markdownSettings={markdownSettings}
         onMarkdownSettingsChange={(patch) => {
           void handleMarkdownSettingsPatch(patch);

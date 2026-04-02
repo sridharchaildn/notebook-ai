@@ -15,6 +15,9 @@ from .local_settings_store import LocalSettingsStore
 from .logging_setup import configure_sidecar_logging
 from .models import (
     AITransformRequest,
+    CaptureSessionChunkAck,
+    CaptureSessionStartRequest,
+    CaptureSessionStatus,
     CopilotChatRequest,
     FolderCreateRequest,
     FolderNode,
@@ -48,7 +51,9 @@ from .provider_models import fetch_provider_models
 from .provider_status_store import ProviderStatusStore
 from .services.drive_sync_service import DriveSyncService
 from .storage_profile_store import StorageProfileStore
+from .sync_state_store import SyncStateStore
 from .services.ai_service import AIService
+from .services.capture_session_service import CaptureSessionService
 from .services.transcription_service import TranscriptionService
 
 
@@ -68,6 +73,7 @@ def create_app(
         current_settings.storage_profile_path,
         current_settings.sync_profile_path,
     )
+    sync_state_store = SyncStateStore(current_settings.sync_state_path)
     local_settings_store = LocalSettingsStore(current_settings.settings_profile_path)
     startup_pref = storage_store.get_preference(note_store.get_local_root())
     if startup_pref.local_root:
@@ -79,7 +85,15 @@ def create_app(
         current_settings,
         note_store,
         storage_store,
+        sync_state_store,
         transport=sync_transport,
+    )
+    capture_session_service = CaptureSessionService(
+        Path(note_store.get_local_root()),
+        transcription_service,
+        local_settings_store.get_transcription_preferences,
+        note_store=note_store,
+        note_upsert_callback=drive_sync_service.request_note_upsert,
     )
 
     app = FastAPI(title="Notebook AI Local Sidecar", version=current_settings.app_version)
@@ -108,6 +122,10 @@ def create_app(
         response.headers["X-Frame-Options"] = "DENY"
         return response
 
+    @app.on_event("startup")
+    async def recover_capture_sessions() -> None:
+        await capture_session_service.recover_unfinished_sessions()
+
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return HealthResponse(
@@ -128,7 +146,7 @@ def create_app(
     ) -> NoteDocument:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         created = note_store.create_note(payload)
-        drive_sync_service.request_sync()
+        drive_sync_service.request_note_upsert(created.frontmatter.id)
         return created
 
     @app.put("/notes/{note_id}", response_model=NoteDocument)
@@ -139,8 +157,9 @@ def create_app(
     ) -> NoteDocument:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
-            updated = note_store.update_note(note_id=note_id, payload=payload)
-            drive_sync_service.request_sync()
+            updated, changed = note_store.update_note_with_change_flag(note_id=note_id, payload=payload)
+            if changed:
+                drive_sync_service.request_note_upsert(updated.frontmatter.id)
             return updated
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -153,8 +172,9 @@ def create_app(
     ) -> NoteDocument:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
-            moved = note_store.move_note(note_id=note_id, folder_id=payload.folder_id)
-            drive_sync_service.request_sync()
+            moved, changed = note_store.move_note_with_change_flag(note_id=note_id, folder_id=payload.folder_id)
+            if changed:
+                drive_sync_service.request_note_upsert(moved.frontmatter.id)
             return moved
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -179,7 +199,7 @@ def create_app(
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
             folder = note_store.create_folder(payload.name)
-            drive_sync_service.request_sync()
+            drive_sync_service.request_folder_sync()
             return folder
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -192,8 +212,9 @@ def create_app(
     ) -> FolderNode:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
         try:
-            folder = note_store.update_folder(folder_id, payload.name)
-            drive_sync_service.request_sync()
+            folder, changed = note_store.update_folder_with_change_flag(folder_id, payload.name)
+            if changed:
+                drive_sync_service.request_folder_sync()
             return folder
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -203,10 +224,10 @@ def create_app(
     @app.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_folder(folder_id: str, authorization: str | None = Header(default=None)) -> None:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
-        if not note_store.delete_folder(folder_id):
+        moved_note_ids = note_store.delete_folder(folder_id)
+        if moved_note_ids is None:
             raise HTTPException(status_code=404, detail=f"Folder {folder_id} not found")
-        drive_sync_service.record_folder_deletion(folder_id)
-        drive_sync_service.request_full_resync()
+        drive_sync_service.record_folder_deletion(folder_id, moved_note_ids)
 
     @app.get("/storage/local-root", response_model=LocalRootResponse)
     async def get_local_root(authorization: str | None = Header(default=None)) -> LocalRootResponse:
@@ -219,11 +240,16 @@ def create_app(
         authorization: str | None = Header(default=None),
     ) -> LocalRootResponse:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        current_root = note_store.get_local_root()
+        next_root = str(Path(payload.local_root).expanduser().resolve())
+        if current_root == next_root:
+            return LocalRootResponse(local_root=current_root)
         note_store.set_notes_dir(Path(payload.local_root))
+        capture_session_service.set_base_dir(Path(note_store.get_local_root()))
         pref = storage_store.get_preference(note_store.get_local_root())
         storage_store.set_preference(mode=pref.mode, local_root=note_store.get_local_root())
         if pref.mode == "local_and_drive":
-            drive_sync_service.request_full_resync()
+            drive_sync_service.request_full_resync("Local root changed.")
         return LocalRootResponse(local_root=note_store.get_local_root())
 
     @app.get("/storage/preference", response_model=StoragePreference)
@@ -239,12 +265,19 @@ def create_app(
         authorization: str | None = Header(default=None),
     ) -> StoragePreference:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        current_pref = storage_store.get_preference(note_store.get_local_root())
+        local_root_changed = False
         if payload.local_root:
-            note_store.set_notes_dir(Path(payload.local_root))
+            requested_root = str(Path(payload.local_root).expanduser().resolve())
+            if note_store.get_local_root() != requested_root:
+                note_store.set_notes_dir(Path(payload.local_root))
+                capture_session_service.set_base_dir(Path(note_store.get_local_root()))
+                local_root_changed = True
         enabled = payload.mode == "local_and_drive"
+        mode_changed = current_pref.mode != payload.mode
         storage_store.set_sync_enabled(enabled)
-        if enabled:
-            drive_sync_service.request_full_resync()
+        if enabled and (mode_changed or local_root_changed):
+            drive_sync_service.request_full_resync("Storage preference changed.")
         return storage_store.set_preference(mode=payload.mode, local_root=note_store.get_local_root())
 
     @app.get("/settings/transcription", response_model=TranscriptionPreferences)
@@ -285,6 +318,7 @@ def create_app(
     @app.post("/sync/run", response_model=SyncStatus)
     async def run_sync(authorization: str | None = Header(default=None)) -> SyncStatus:
         drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        drive_sync_service.request_full_resync("Manual sync requested.")
         return await drive_sync_service.run_sync_now()
 
     @app.post("/ai/transform/stream")
@@ -462,6 +496,84 @@ def create_app(
             recoverable=result.recoverable,
             segment_id=result.segment_id,
         )
+
+    @app.post("/capture-sessions/start", response_model=CaptureSessionStatus)
+    async def start_capture_session(
+        payload: CaptureSessionStartRequest,
+        authorization: str | None = Header(default=None),
+    ) -> CaptureSessionStatus:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        return await capture_session_service.start_session(payload)
+
+    @app.post("/capture-sessions/{session_id}/chunks", response_model=CaptureSessionChunkAck)
+    async def append_capture_session_chunk(
+        session_id: str,
+        file: UploadFile = File(...),
+        chunk_index: int = Form(...),
+        source_hint: str = Form(default="unknown"),
+        started_at_ms: int | None = Form(default=None),
+        duration_ms: int | None = Form(default=None),
+        authorization: str | None = Header(default=None),
+    ) -> CaptureSessionChunkAck:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        if source_hint not in {"me", "other_audio", "unknown"}:
+            raise HTTPException(status_code=400, detail="Unsupported source_hint")
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Audio chunk is empty")
+        try:
+            return await capture_session_service.append_chunk(
+                session_id=session_id,
+                chunk_index=chunk_index,
+                source_hint=source_hint,
+                audio_bytes=audio_bytes,
+                filename=file.filename or f"{source_hint}-{chunk_index}.wav",
+                content_type=file.content_type or "audio/wav",
+                started_at_ms=started_at_ms,
+                duration_ms=duration_ms,
+                access_token=_bearer_token_from_header(authorization),
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/capture-sessions/{session_id}/finalize", response_model=CaptureSessionStatus)
+    async def finalize_capture_session(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> CaptureSessionStatus:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        try:
+            return await capture_session_service.finalize_session(
+                session_id,
+                access_token=_bearer_token_from_header(authorization),
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/capture-sessions/{session_id}", response_model=CaptureSessionStatus)
+    async def get_capture_session_status(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> CaptureSessionStatus:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        try:
+            return capture_session_service.get_status(session_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/capture-sessions/{session_id}/retry-recovery", response_model=CaptureSessionStatus)
+    async def retry_capture_session_recovery(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> CaptureSessionStatus:
+        drive_sync_service.remember_desktop_session(_bearer_token_from_header(authorization))
+        try:
+            return await capture_session_service.retry_recovery(
+                session_id,
+                access_token=_bearer_token_from_header(authorization),
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/providers/status", response_model=list[ProviderConnection])
     async def provider_status() -> list[ProviderConnection]:

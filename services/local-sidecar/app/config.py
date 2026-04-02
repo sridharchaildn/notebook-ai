@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     profile_path: Path = Path("~/.notebook-ai/provider_status.json")
     storage_profile_path: Path = Path("~/.notebook-ai/storage_profile.json")
     sync_profile_path: Path = Path("~/.notebook-ai/sync_profile.json")
+    sync_state_path: Path = Path("~/.notebook-ai/sync_state.json")
     settings_profile_path: Path = Path("~/.notebook-ai/user_settings.json")
 
     default_provider: str = "openai"
@@ -58,6 +59,7 @@ class Settings(BaseSettings):
         "profile_path",
         "storage_profile_path",
         "sync_profile_path",
+        "sync_state_path",
         "settings_profile_path",
         "ffmpeg_path",
         mode="before",
