@@ -38,6 +38,8 @@ function buildSettingsModalProps() {
     driveConnected: false,
     driveFolderName: 'Notebook AI',
     driveStatusBusy: false,
+    driveDisconnectBusy: false,
+    manualDriveConnectUrl: null,
     onStorageModeChange: vi.fn(),
     onChooseLocalFolder: vi.fn(),
     onRunSyncNow: vi.fn(),
@@ -64,6 +66,9 @@ function buildSettingsModalProps() {
     onMarkdownSettingsChange: vi.fn(),
     onConnectDrive: vi.fn(),
     onRefreshDriveStatus: vi.fn(),
+    onDisconnectDrive: vi.fn(),
+    onOpenManualDriveConnect: vi.fn(),
+    onCopyManualDriveConnectUrl: vi.fn(),
     buildVersion: '0.1.0',
   };
 }

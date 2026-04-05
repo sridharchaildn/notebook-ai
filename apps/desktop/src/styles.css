@@ -313,6 +313,106 @@ body.is-resizing-panels .panel-resizer::after {
   padding: 4px 8px 12px;
 }
 
+.note-list__loading-state {
+  display: grid;
+  gap: 14px;
+  margin: 6px 4px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(16px);
+}
+
+.note-list__loading-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.note-list__loading-copy strong {
+  font-size: 0.92rem;
+  letter-spacing: -0.02em;
+}
+
+.note-list__loading-copy p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.note-list__loading-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-subtle) 72%, transparent);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.note-list__loading-spinner {
+  animation: note-list-spin 900ms linear infinite;
+}
+
+.note-list__loading-skeleton {
+  display: grid;
+  gap: 8px;
+}
+
+.note-list__loading-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 64%, var(--surface-sunken));
+}
+
+.note-list__loading-chevron,
+.note-list__loading-label,
+.note-list__loading-count {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface-sunken));
+}
+
+.note-list__loading-chevron::after,
+.note-list__loading-label::after,
+.note-list__loading-count::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+  animation: note-list-shimmer 1.2s ease-in-out infinite;
+}
+
+.note-list__loading-chevron {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  opacity: 0.8;
+}
+
+.note-list__loading-label {
+  height: 10px;
+  border-radius: 999px;
+}
+
+.note-list__loading-count {
+  width: 30px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: 999px;
+}
+
 .note-row {
   position: relative;
   display: flex;
@@ -478,6 +578,18 @@ body.is-resizing-panels .panel-resizer::after {
   font-size: 0.84rem;
   text-align: center;
   padding: 32px 16px;
+}
+
+@keyframes note-list-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes note-list-spin {
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 .folder-section {

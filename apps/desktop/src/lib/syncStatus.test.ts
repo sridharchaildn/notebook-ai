@@ -3,6 +3,7 @@ import type { SyncStatus } from '@notebook-ai/contracts';
 import {
   buildSyncBannerModel,
   describeSyncStatus,
+  isDriveMirrorLikelyConnected,
   syncPhaseLabel,
   syncProgressPercent,
 } from './syncStatus';
@@ -69,5 +70,24 @@ describe('sync status helpers', () => {
       detail: 'Google Drive access expired.',
       progressPercent: null,
     });
+  });
+
+  it('treats recent successful mirror activity as likely connected', () => {
+    expect(
+      isDriveMirrorLikelyConnected(
+        buildStatus({
+          last_synced_at: '2026-04-03T18:58:12Z',
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      isDriveMirrorLikelyConnected(
+        buildStatus({
+          enabled: false,
+          last_synced_at: '2026-04-03T18:58:12Z',
+        }),
+      ),
+    ).toBe(false);
   });
 });

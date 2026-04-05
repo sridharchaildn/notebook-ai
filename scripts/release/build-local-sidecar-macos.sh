@@ -23,6 +23,8 @@ mkdir -p "$DIST_DIR" "$TMP_DIR"
   --specpath "$TMP_DIR/spec" \
   --name notebook-ai-local-sidecar \
   --paths "$ROOT/services/local-sidecar" \
+  --add-data "$ROOT/specs:specs" \
+  --add-data "$ROOT/VERSION:." \
   --hidden-import uvicorn.logging \
   --hidden-import uvicorn.loops.auto \
   --hidden-import uvicorn.protocols.http.auto \

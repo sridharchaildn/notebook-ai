@@ -69,8 +69,21 @@ class Settings(BaseSettings):
         value: str | tuple[str, ...] | list[str],
     ) -> tuple[str, ...]:
         if isinstance(value, str):
-            return tuple(item.strip() for item in value.split(",") if item.strip())
-        return tuple(item.strip() for item in value if item.strip())
+            items = [item.strip() for item in value.split(",") if item.strip()]
+        else:
+            items = [item.strip() for item in value if item.strip()]
+
+        if "null" not in items:
+            items.append("null")
+
+        deduped: list[str] = []
+        seen = set()
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return tuple(deduped)
 
     @property
     def supabase_server_key(self) -> str | None:

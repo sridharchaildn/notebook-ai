@@ -460,3 +460,21 @@ async def test_incremental_queue_and_remote_index_persist_across_restart(tmp_pat
     assert restarted_service.get_status().pending_ops == 1
     assert created.frontmatter.id in restarted_state.queue.note_upserts
     assert restarted_state.notes[created.frontmatter.id].remote_file_id == "remote-file-9"
+
+
+@pytest.mark.asyncio
+async def test_drive_sync_reports_failing_host_for_request_errors(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cloud.test" and request.url.path == "/integrations/google-drive/status":
+            raise httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known", request=request)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    service, _note_store, profile_store, _sync_state_store = _build_sync_service(tmp_path, handler)
+
+    status = await service.run_sync_now()
+
+    assert status.state == "error"
+    assert status.last_error == (
+        "Unable to reach cloud API (cloud.test): [Errno 8] nodename nor servname provided, or not known"
+    )
+    assert profile_store.get_sync_status().last_error == status.last_error

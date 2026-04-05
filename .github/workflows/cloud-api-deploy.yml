@@ -105,4 +105,5 @@ jobs:
           NOTEBOOK_CLOUD_GOOGLE_DRIVE_SCOPE: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_SCOPE }}
           NOTEBOOK_CLOUD_GOOGLE_DRIVE_DEFAULT_FOLDER_NAME: ${{ secrets.NOTEBOOK_CLOUD_GOOGLE_DRIVE_DEFAULT_FOLDER_NAME }}
           NOTEBOOK_CLOUD_DEBUG: ${{ secrets.NOTEBOOK_CLOUD_DEBUG }}
+          CONTAINER_APP_MIN_REPLICAS: 1
         run: bash ./infra/container-apps/deploy-cloud-api.sh

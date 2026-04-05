@@ -37,7 +37,7 @@ import { buildLiveCaptureChunkFilename, LIVE_CAPTURE_MIME_TYPE } from './liveAud
 export type { TranscriptionEngine } from '@notebook-ai/contracts';
 
 const LOCAL_BASE_URL = import.meta.env.VITE_LOCAL_API_URL ?? 'http://127.0.0.1:8787';
-const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? 'http://127.0.0.1:8790';
+const CLOUD_BASE_URL = import.meta.env.VITE_CLOUD_API_URL ?? null;
 
 const AUTH_INVALID_EVENT = 'notebook:auth-invalid';
 const LOCAL_DESKTOP_TOKEN_HEADER = 'X-Notebook-Desktop-Token';
@@ -51,6 +51,7 @@ export interface DesktopRendererSession {
 
 let rendererSessionFallback: DesktopRendererSession | null = null;
 let localDesktopTokenFallback: string | null = null;
+let cloudBaseUrlFallback: string | null = null;
 
 export class DesktopAuthExpiredError extends Error {
   constructor(message = 'Session expired. Sign in again.') {
@@ -80,6 +81,11 @@ function isRendererSessionExpired(session: DesktopRendererSession | null): boole
 }
 
 async function getDesktopAuthSession() {
+  const fallbackSession = getRendererSessionFallback();
+  if (fallbackSession && !isRendererSessionExpired(fallbackSession)) {
+    return fallbackSession;
+  }
+
   const bridgeSession = await window.notebookDesktop?.getAuthSession?.();
   if (bridgeSession?.userId) {
     if (isRendererSessionExpired(bridgeSession)) {
@@ -90,7 +96,6 @@ async function getDesktopAuthSession() {
     return bridgeSession;
   }
 
-  const fallbackSession = getRendererSessionFallback();
   if (isRendererSessionExpired(fallbackSession)) {
     await clearDesktopAuthSession();
     return null;
@@ -136,6 +141,12 @@ async function localAuthHeaders(
   };
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 async function getLocalDesktopToken(): Promise<string> {
   if (localDesktopTokenFallback) return localDesktopTokenFallback;
   const bridgeToken = await window.notebookDesktop?.getLocalApiToken?.();
@@ -144,6 +155,20 @@ async function getLocalDesktopToken(): Promise<string> {
   }
   localDesktopTokenFallback = bridgeToken;
   return bridgeToken;
+}
+
+async function getCloudBaseUrl(): Promise<string> {
+  if (cloudBaseUrlFallback) return cloudBaseUrlFallback;
+
+  const appInfo = await window.notebookDesktop?.getAppInfo?.();
+  if (appInfo?.cloudApiUrl) {
+    cloudBaseUrlFallback = appInfo.cloudApiUrl;
+    return cloudBaseUrlFallback;
+  }
+
+  const fallbackUrl = CLOUD_BASE_URL ?? 'http://127.0.0.1:8790';
+  cloudBaseUrlFallback = fallbackUrl;
+  return fallbackUrl;
 }
 
 function isDesktopTokenMismatch(status: number, detail: string | null): boolean {
@@ -193,11 +218,12 @@ async function cloudFetch(
   init: RequestInit = {},
   fallback = 'Cloud request failed.',
 ): Promise<Response> {
+  const cloudBaseUrl = await getCloudBaseUrl();
   const headers = {
     ...(await authorizedCloudHeaders(init.body ? 'json' : 'none')),
     ...(init.headers ?? {}),
   };
-  const response = await fetch(`${CLOUD_BASE_URL}${input}`, { ...init, headers });
+  const response = await fetch(`${cloudBaseUrl}${input}`, { ...init, headers });
   if (response.status === 401) {
     await clearDesktopAuthSession();
     throw new DesktopAuthExpiredError();
@@ -439,6 +465,38 @@ export async function fetchSyncStatus(): Promise<SyncStatus> {
   return (await res.json()) as SyncStatus;
 }
 
+export async function waitForLocalApiReady(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: Error | null = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${LOCAL_BASE_URL}/health`);
+      if (response.ok) {
+        return;
+      }
+
+      let detail: string | null = null;
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        detail = typeof payload.detail === 'string' ? payload.detail.trim() : null;
+      } catch {
+        /* ignore */
+      }
+
+      if (response.status >= 500 && detail) {
+        throw new Error(detail);
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Local sidecar unavailable.');
+    }
+
+    await delay(250);
+  }
+
+  throw lastError ?? new Error('Local sidecar did not start in time.');
+}
+
 export async function runSyncNow(): Promise<SyncStatus> {
   const res = await fetch(`${LOCAL_BASE_URL}/sync/run`, {
     method: 'POST',
@@ -459,9 +517,26 @@ export async function fetchGoogleDriveStatus(): Promise<DriveConnectionStatus> {
   return (await response.json()) as DriveConnectionStatus;
 }
 
-export async function openGoogleDriveConnect(): Promise<void> {
+export async function openGoogleDriveConnect(): Promise<{ url: string; browserOpened: boolean }> {
   const payload = await startOAuthFlow('/integrations/google-drive/oauth/start');
-  await openExternalUrl(payload.url);
+  try {
+    await openExternalUrl(payload.url);
+    return { url: payload.url, browserOpened: true };
+  } catch {
+    return { url: payload.url, browserOpened: false };
+  }
+}
+
+export async function disconnectGoogleDrive(): Promise<DriveConnectionStatus> {
+  const response = await cloudFetch(
+    '/integrations/google-drive/disconnect',
+    {
+      method: 'POST',
+      headers: await authorizedCloudHeaders('none'),
+    },
+    'Unable to disconnect Google Drive.',
+  );
+  return (await response.json()) as DriveConnectionStatus;
 }
 
 export async function logoutCloudSession(): Promise<void> {

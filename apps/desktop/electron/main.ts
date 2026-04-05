@@ -19,9 +19,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PACKAGED_CLOUD_API_URL = 'https://api.notebook-ai.app';
+const BUILT_CLOUD_API_URL = import.meta.env.VITE_CLOUD_API_URL?.trim();
+const RUNTIME_CLOUD_API_URL = process.env.NOTEBOOK_CLOUD_API_URL?.trim();
 const CLOUD_API_URL =
-  process.env.NOTEBOOK_CLOUD_API_URL ??
-  process.env.VITE_CLOUD_API_URL ??
+  RUNTIME_CLOUD_API_URL ||
+  BUILT_CLOUD_API_URL ||
   (app.isPackaged ? DEFAULT_PACKAGED_CLOUD_API_URL : 'http://127.0.0.1:8790');
 const SUPABASE_URL =
   import.meta.env.VITE_SUPABASE_URL ??
@@ -77,6 +79,7 @@ interface DesktopAppInfo {
   buildVersion: string;
   isPackaged: boolean;
   platform: NodeJS.Platform;
+  cloudApiUrl: string;
 }
 
 let sidecarProcess: ChildProcess | null = null;
@@ -85,6 +88,13 @@ let mainWindow: BrowserWindow | null = null;
 const pendingDeepLinks: string[] = [];
 let cachedAuthState: PersistedAuthState | null = null;
 let cachedDesktopClientToken: string | null = null;
+let lastAuthSessionLog: string | null = null;
+
+function logAuthSession(message: string) {
+  if (lastAuthSessionLog === message) return;
+  lastAuthSessionLog = message;
+  process.stdout.write(`${message}\n`);
+}
 
 function createNotebookAppIcon() {
   const candidatePaths = [
@@ -248,6 +258,7 @@ function getDesktopAppInfo(): DesktopAppInfo {
     buildVersion: desktopBuildVersion(),
     isPackaged: app.isPackaged,
     platform: process.platform,
+    cloudApiUrl: CLOUD_API_URL,
   };
 }
 
@@ -561,26 +572,26 @@ async function refreshStoredSession(
 async function getStoredSessionForRenderer(): Promise<DesktopRendererSession | null> {
   const authState = readPersistedAuthState();
   if (!authState.session) {
-    process.stdout.write('[auth] get-session -> none\n');
+    logAuthSession('[auth] get-session -> none');
     return null;
   }
 
   if (!shouldRefreshSession(authState.session)) {
     const session = toRendererSession(authState.session);
-    process.stdout.write(`[auth] get-session -> ${session?.userId ?? 'none'}\n`);
+    logAuthSession(`[auth] get-session -> ${session?.userId ?? 'none'}`);
     return session;
   }
 
   const refreshed = await refreshStoredSession(authState.session);
   if (!refreshed) {
     writePersistedAuthState({ ...authState, session: null });
-    process.stdout.write('[auth] get-session -> refresh failed\n');
+    logAuthSession('[auth] get-session -> refresh failed');
     return null;
   }
 
   writePersistedAuthState({ ...authState, session: refreshed });
   const session = toRendererSession(refreshed);
-  process.stdout.write(`[auth] get-session -> refreshed ${session?.userId ?? 'none'}\n`);
+  logAuthSession(`[auth] get-session -> refreshed ${session?.userId ?? 'none'}`);
   return session;
 }
 
@@ -891,6 +902,7 @@ app.on('open-url', (event, url) => {
 
 app.whenReady().then(async () => {
   app.setName(APP_DISPLAY_NAME);
+  process.stdout.write(`[cloud-api] Desktop using ${CLOUD_API_URL}\n`);
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(createNotebookAppIcon());
   }

@@ -65,7 +65,11 @@ def create_app(
 ) -> FastAPI:
     current_settings = settings or Settings()
     log = configure_sidecar_logging(current_settings.debug)
-    log.info("Local sidecar starting (debug=%s)", current_settings.debug)
+    log.info(
+        "Local sidecar starting (debug=%s, cloud_api_url=%s)",
+        current_settings.debug,
+        current_settings.cloud_api_url,
+    )
 
     note_store = NoteStore(current_settings.notes_dir)
     provider_status_store = ProviderStatusStore(current_settings.profile_path)

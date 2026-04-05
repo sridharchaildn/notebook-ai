@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from time import perf_counter
 from typing import Annotated
 from urllib.parse import urlencode
 
@@ -61,7 +62,45 @@ def create_app(
 
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
-        response = await call_next(request)
+        started_at = perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = (perf_counter() - started_at) * 1000
+            log.exception(
+                "request failed method=%s path=%s duration_ms=%.1f",
+                request.method,
+                request.url.path,
+                duration_ms,
+            )
+            raise
+
+        duration_ms = (perf_counter() - started_at) * 1000
+        if request.url.path == "/health" and response.status_code < 400:
+            log.debug(
+                "request method=%s path=%s status=%s duration_ms=%.1f",
+                request.method,
+                request.url.path,
+                response.status_code,
+                duration_ms,
+            )
+        elif response.status_code >= 400:
+            log.warning(
+                "request method=%s path=%s status=%s duration_ms=%.1f",
+                request.method,
+                request.url.path,
+                response.status_code,
+                duration_ms,
+            )
+        else:
+            log.info(
+                "request method=%s path=%s status=%s duration_ms=%.1f",
+                request.method,
+                request.url.path,
+                response.status_code,
+                duration_ms,
+            )
+
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
@@ -336,6 +375,31 @@ def create_app(
             folder_id=folder_id,
             last_updated_at=None,
         )
+
+    async def _disconnect_google_drive(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> DriveConnectionStatus:
+        user = await _require_user(current_auth, authorization)
+        await current_store.delete_credential(user.id, "google_drive")
+        log.info("DELETE google_drive user_id=%s", user.id)
+        return DriveConnectionStatus(
+            connected=False,
+            folder_name=current_settings.google_drive_default_folder_name,
+            folder_id=None,
+            last_updated_at=None,
+        )
+
+    @app.post("/integrations/google-drive/disconnect", response_model=DriveConnectionStatus)
+    async def google_drive_disconnect_post(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> DriveConnectionStatus:
+        return await _disconnect_google_drive(authorization)
+
+    @app.delete("/integrations/google-drive", response_model=DriveConnectionStatus)
+    async def google_drive_disconnect_delete(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> DriveConnectionStatus:
+        return await _disconnect_google_drive(authorization)
 
     @app.put("/integrations/google-drive/folder", response_model=DriveConnectionStatus)
     async def google_drive_folder_update(

@@ -35,6 +35,13 @@ export function syncProgressPercent(syncStatus: SyncStatus | null): number {
   );
 }
 
+export function isDriveMirrorLikelyConnected(syncStatus: SyncStatus | null): boolean {
+  if (!syncStatus?.enabled) return false;
+  if (syncStatus.state === 'syncing') return true;
+  if (syncStatus.pending_ops > 0) return true;
+  return Boolean(syncStatus.last_synced_at);
+}
+
 export function describeSyncStatus(status: SyncStatus, folderName?: string): string {
   const target = folderName || 'Notebook AI';
   if (status.state === 'syncing') {

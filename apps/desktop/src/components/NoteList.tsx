@@ -6,6 +6,7 @@ import {
   Ellipsis,
   FolderPlus,
   HelpCircle,
+  LoaderCircle,
   LogOut,
   PanelLeftClose,
   Search,
@@ -22,6 +23,7 @@ const ROOT_FOLDER_LABEL = 'Notes';
 interface Props {
   notes: NoteDocument[];
   folders: FolderNode[];
+  loadingWorkspace: boolean;
   selectedId: string | null;
   selectedFolderId: string | null;
   selectedNoteIds: string[];
@@ -49,6 +51,7 @@ interface Props {
 export function NoteList({
   notes,
   folders,
+  loadingWorkspace,
   selectedId,
   selectedFolderId,
   selectedNoteIds,
@@ -131,6 +134,8 @@ export function NoteList({
     }
     return grouped;
   }, [notes, folders]);
+
+  const showWorkspaceLoadingState = loadingWorkspace && notes.length === 0 && folders.length === 0;
 
   function renderNoteRow(note: NoteDocument) {
     const isActive = selectedId === note.frontmatter.id;
@@ -492,7 +497,27 @@ export function NoteList({
       ) : null}
 
       <div className="note-list__items">
-        {notes.length === 0 && folders.length === 0 ? (
+        {showWorkspaceLoadingState ? (
+          <div className="note-list__loading-state" role="status" aria-live="polite">
+            <div className="note-list__loading-copy">
+              <span className="note-list__loading-badge">
+                <LoaderCircle size={13} className="note-list__loading-spinner" />
+                Loading workspace
+              </span>
+              <strong>Loading folders...</strong>
+              <p>Restoring your local notes, folders, and sidebar state.</p>
+            </div>
+            <div className="note-list__loading-skeleton" aria-hidden="true">
+              {['42%', '58%', '47%', '62%', '38%'].map((width, index) => (
+                <div key={width} className="note-list__loading-row">
+                  <span className="note-list__loading-chevron" />
+                  <span className="note-list__loading-label" style={{ width }} />
+                  <span className="note-list__loading-count" style={{ animationDelay: `${index * 80}ms` }} />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : notes.length === 0 && folders.length === 0 ? (
           <p className="empty-state">No notes yet. Create your first note or folder.</p>
         ) : activeTab === 'folders' ? (
           folderEntries

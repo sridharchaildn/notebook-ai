@@ -58,6 +58,7 @@ import {
   createNote,
   deleteFolder,
   deleteNote,
+  disconnectGoogleDrive,
   getRendererSessionFallback,
   disconnectProvider,
   type DesktopRendererSession,
@@ -89,8 +90,9 @@ import {
   updateStoragePreference,
   updateNote,
   updateTranscriptionPreferences,
+  waitForLocalApiReady,
 } from './lib/api';
-import { describeSyncStatus } from './lib/syncStatus';
+import { describeSyncStatus, isDriveMirrorLikelyConnected } from './lib/syncStatus';
 import {
   createLiveCaptureHandle,
   type LiveCaptureChunk,
@@ -134,6 +136,10 @@ const AI_PANEL_WIDTH_STORAGE_KEY = 'notebook_ai_panel_width';
 const NOTE_DETAILS_EXPANDED_STORAGE_KEY = 'notebook_note_details_expanded';
 const DEFAULT_SIDEBAR_WIDTH = 280;
 const DEFAULT_AI_PANEL_WIDTH = 340;
+const SYNC_STATUS_POLL_SYNCING_MS = 2500;
+const SYNC_STATUS_POLL_PENDING_MS = 5000;
+const SYNC_STATUS_POLL_ERROR_MS = 15000;
+const SYNC_STATUS_POLL_IDLE_MS = 30000;
 const MIN_SIDEBAR_WIDTH = 236;
 const MAX_SIDEBAR_WIDTH = 420;
 const MIN_AI_PANEL_WIDTH = 280;
@@ -194,6 +200,13 @@ function clampValue(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function syncStatusPollInterval(status: SyncStatus | null): number {
+  if (status?.state === 'syncing') return SYNC_STATUS_POLL_SYNCING_MS;
+  if ((status?.pending_ops ?? 0) > 0) return SYNC_STATUS_POLL_PENDING_MS;
+  if (status?.state === 'error' || status?.state === 'needs_setup') return SYNC_STATUS_POLL_ERROR_MS;
+  return SYNC_STATUS_POLL_IDLE_MS;
+}
+
 function normalizeNullableText(value: string | null | undefined): string | null {
   const trimmed = (value ?? '').trim();
   return trimmed.length > 0 ? trimmed : null;
@@ -231,9 +244,22 @@ type SettingsFeedback = {
   message: string;
 };
 
+const DRIVE_APPROVAL_FEEDBACK_MESSAGES = new Set([
+  'Starting Google Drive connection...',
+  'Approve Google Drive access in your browser. Notebook AI will start mirroring automatically.',
+  'Browser did not open automatically. Use Open approval page below.',
+  'Opened Google Drive approval in your default browser.',
+  'Copied the Google Drive approval link.',
+]);
+
+function isDriveApprovalFeedback(feedback: SettingsFeedback | null): boolean {
+  return feedback?.tone === 'success' && DRIVE_APPROVAL_FEEDBACK_MESSAGES.has(feedback.message);
+}
+
 export default function App() {
   const [notes, setNotes] = useState<NoteDocument[]>([]);
   const [folders, setFolders] = useState<FolderNode[]>([]);
+  const [workspaceBootstrapPending, setWorkspaceBootstrapPending] = useState(false);
   const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -271,6 +297,7 @@ export default function App() {
   const [authPending, setAuthPending] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
   const [manualSignInUrl, setManualSignInUrl] = useState<string | null>(null);
+  const [manualDriveConnectUrl, setManualDriveConnectUrl] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [magicLinkEmail, setMagicLinkEmail] = useState('');
@@ -296,7 +323,9 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncActionBusy, setSyncActionBusy] = useState(false);
   const [driveStatus, setDriveStatus] = useState<DriveConnectionStatus>(DEFAULT_DRIVE_STATUS);
+  const [driveStatusResolved, setDriveStatusResolved] = useState(false);
   const [driveStatusBusy, setDriveStatusBusy] = useState(false);
+  const [driveDisconnectBusy, setDriveDisconnectBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [aiPanelOpen, setAiPanelOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
@@ -743,6 +772,7 @@ export default function App() {
         ]);
         const session = bridgeSession ?? getRendererSessionFallback();
         if (disposed) return;
+        setRendererSessionFallback(session);
         setBuildVersion(appInfo?.buildVersion ?? appInfo?.version ?? '0.1.0');
         setSessionUserId(session?.userId ?? null);
         setAuthPending(Boolean(!session?.userId && pendingAuthFlow));
@@ -777,20 +807,8 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
-    const syncSessionFromMain = async () => {
-      const session = (await window.notebookDesktop?.getAuthSession?.()) ?? getRendererSessionFallback();
-      if (!disposed && session?.userId) {
-        applyRendererSession(session);
-        return true;
-      }
-      return false;
-    };
-
     const tryConsumePending = async () => {
       try {
-        if (await syncSessionFromMain()) {
-          return;
-        }
         const url = await window.notebookDesktop?.consumeAuthCallback?.();
         if (!disposed && url) {
           void handleDesktopAuthCallback(url);
@@ -801,10 +819,11 @@ export default function App() {
     };
 
     void tryConsumePending();
-    const pollTimer = window.setInterval(() => {
-      if (sessionUserId) return;
-      void tryConsumePending();
-    }, 1200);
+    const pollTimer = authPending && !sessionUserId
+      ? window.setInterval(() => {
+          void tryConsumePending();
+        }, 1200)
+      : null;
 
     const unsubscribeAuthCallback = window.notebookDesktop?.onAuthCallback?.((url) => {
       void handleDesktopAuthCallback(url);
@@ -814,11 +833,13 @@ export default function App() {
     });
     return () => {
       disposed = true;
-      window.clearInterval(pollTimer);
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+      }
       unsubscribeAuthCallback?.();
       unsubscribeSession?.();
     };
-  }, [sessionUserId]);
+  }, [authPending, sessionUserId]);
 
   useEffect(() => {
     if (!authReady || !sessionUserId) return;
@@ -866,8 +887,13 @@ export default function App() {
 
   useEffect(() => {
     if (!authReady || !sessionUserId) return;
+
+    let disposed = false;
+    setWorkspaceBootstrapPending(true);
     void (async () => {
       try {
+        await waitForLocalApiReady();
+        if (disposed) return;
         const [
           loadedNotes,
           loadedFolders,
@@ -875,9 +901,6 @@ export default function App() {
           pref,
           localRoot,
           sync,
-          drive,
-          loadedTranscriptionPreferences,
-          loadedMarkdownSettings,
         ] = await Promise.all([
           fetchNotes(),
           fetchFolders().catch(() => []),
@@ -885,39 +908,19 @@ export default function App() {
           fetchStoragePreference().catch(() => ({ mode: 'local', local_root: null } as StoragePreference)),
           fetchLocalRoot().catch(() => ''),
           fetchSyncStatus().catch(() => null),
-          fetchGoogleDriveStatus().catch(() => DEFAULT_DRIVE_STATUS),
-          fetchTranscriptionPreferences().catch(
-            () =>
-              ({
-                main_language: 'auto',
-                spoken_languages: [],
-                custom_vocabulary: [],
-                updated_at: null,
-              }) as TranscriptionPreferences,
-          ),
-          fetchMarkdownSettings().catch(
-            () =>
-              ({
-                enable_import: true,
-                enable_export: true,
-                editor_mode: 'rich_text',
-                updated_at: null,
-              }) as MarkdownSettings,
-          ),
         ]);
+        if (disposed) return;
 
-        setNotes(loadedNotes);
+        let nextNotes = loadedNotes;
         setFolders(loadedFolders);
         mergeProviderStatuses(providerStatuses);
         setStoragePreference(pref);
-        setTranscriptionPreferences(loadedTranscriptionPreferences);
-        setMarkdownSettings(loadedMarkdownSettings);
         setLocalRootPath(pref.local_root || localRoot);
         setSyncStatus(sync);
-        setDriveStatus(drive);
 
-        const first = loadedNotes[0];
+        let first = nextNotes[0];
         if (first) {
+          setNotes(nextNotes);
           setSelectedId(first.frontmatter.id);
           setSelectedFolderId(first.frontmatter.folder_id ?? null);
           applyEditorStateFromNote(first);
@@ -931,15 +934,72 @@ export default function App() {
             context_preset: 'custom',
             context_text: null,
           });
-          setNotes([created]);
+          if (disposed) return;
+          nextNotes = [created];
+          first = created;
+          setNotes(nextNotes);
           setSelectedId(created.frontmatter.id);
           setSelectedFolderId(created.frontmatter.folder_id ?? null);
           applyEditorStateFromNote(created);
         }
+
+        void (async () => {
+          const [
+            driveResult,
+            loadedTranscriptionPreferences,
+            loadedMarkdownSettings,
+          ] = await Promise.all([
+            fetchGoogleDriveStatus()
+              .then((status) => ({ status, resolved: true }))
+              .catch(() => ({ status: null, resolved: false })),
+            fetchTranscriptionPreferences().catch(
+              () =>
+                ({
+                  main_language: 'auto',
+                  spoken_languages: [],
+                  custom_vocabulary: [],
+                  updated_at: null,
+                }) as TranscriptionPreferences,
+            ),
+            fetchMarkdownSettings().catch(
+              () =>
+                ({
+                  enable_import: true,
+                  enable_export: true,
+                  editor_mode: 'rich_text',
+                  updated_at: null,
+                }) as MarkdownSettings,
+            ),
+          ]);
+          if (disposed) return;
+          setDriveStatusResolved(driveResult.resolved);
+          if (driveResult.status) {
+            setDriveStatus(driveResult.status);
+          }
+          setTranscriptionPreferences(loadedTranscriptionPreferences);
+          setMarkdownSettings(loadedMarkdownSettings);
+        })();
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : 'Failed to initialize');
+        if (!disposed) {
+          setMessage(error instanceof Error ? error.message : 'Failed to initialize');
+        }
+      } finally {
+        if (!disposed) {
+          setWorkspaceBootstrapPending(false);
+        }
       }
     })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [authReady, sessionUserId]);
+
+  useEffect(() => {
+    if (authReady && sessionUserId) return;
+    setWorkspaceBootstrapPending(false);
+    setDriveStatus(DEFAULT_DRIVE_STATUS);
+    setDriveStatusResolved(false);
   }, [authReady, sessionUserId]);
 
   useEffect(() => {
@@ -991,27 +1051,35 @@ export default function App() {
     if (storagePreference.mode !== 'local_and_drive') return;
 
     let disposed = false;
+    let timer: number | null = null;
+
     const poll = async () => {
+      let nextStatus: SyncStatus | null = syncStatus;
       try {
         const status = await fetchSyncStatus();
         if (!disposed) {
+          nextStatus = status;
           setSyncStatus(status);
         }
       } catch {
         /* ignore transient sync polling failures */
+      } finally {
+        if (!disposed) {
+          timer = window.setTimeout(() => {
+            void poll();
+          }, syncStatusPollInterval(nextStatus));
+        }
       }
     };
 
     void poll();
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 2500);
-
     return () => {
       disposed = true;
-      window.clearInterval(timer);
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [authReady, sessionUserId, storagePreference.mode]);
+  }, [authReady, sessionUserId, storagePreference.mode, syncStatus?.state, syncStatus?.pending_ops]);
 
   useEffect(() => {
     if (!authReady || !sessionUserId) return;
@@ -2151,10 +2219,21 @@ export default function App() {
       const sync = await fetchSyncStatus();
       setSyncStatus(sync);
       if (mode === 'local_and_drive') {
-        const drive = await fetchGoogleDriveStatus().catch(() => DEFAULT_DRIVE_STATUS);
-        setDriveStatus(drive);
-        const successMessage = drive.connected
-          ? describeSyncStatus(sync, drive.folder_name || 'Notebook AI')
+        const drive = await fetchGoogleDriveStatus()
+          .then((status) => {
+            setDriveStatus(status);
+            setDriveStatusResolved(true);
+            return status;
+          })
+          .catch(() => {
+            setDriveStatusResolved(false);
+            return null;
+          });
+        const driveConnected =
+          Boolean(drive?.connected) || (!drive && isDriveMirrorLikelyConnected(sync));
+        const driveFolderName = drive?.folder_name || driveStatus.folder_name || 'Notebook AI';
+        const successMessage = driveConnected
+          ? describeSyncStatus(sync, driveFolderName)
           : 'Drive mirror enabled. Connect Google Drive to start mirroring.';
         setSettingsSuccess(successMessage);
         setMessage(successMessage);
@@ -2183,6 +2262,7 @@ export default function App() {
       setSessionUserId(null);
       setAuthPending(false);
       setManualSignInUrl(null);
+      setManualDriveConnectUrl(null);
       setShowSplash(true);
       setSettingsOpen(false);
       setMessage('Signed out successfully.');
@@ -2196,7 +2276,9 @@ export default function App() {
     try {
       const status = await fetchGoogleDriveStatus();
       setDriveStatus(status);
+      setDriveStatusResolved(true);
       if (status.connected && storagePreference.mode === 'local_and_drive') {
+        setManualDriveConnectUrl(null);
         setSyncStatus((prev) => ({
           enabled: prev?.enabled ?? true,
           pending_ops: prev?.pending_ops ?? 0,
@@ -2211,26 +2293,22 @@ export default function App() {
         }));
         const sync = await runSyncNow();
         setSyncStatus(sync);
-        setMessage(describeSyncStatus(sync, status.folder_name || 'Notebook AI'));
+        const successMessage = describeSyncStatus(sync, status.folder_name || 'Notebook AI');
+        setSettingsSuccess(successMessage);
+        setMessage(successMessage);
         return;
       }
-      setMessage(
-        status.connected
-          ? `Google Drive connected (${status.folder_name || 'Notebook AI'}).`
-          : 'Google Drive is not connected yet.',
-      );
+      if (status.connected) {
+        const successMessage = `Google Drive connected (${status.folder_name || 'Notebook AI'}).`;
+        setSettingsSuccess(successMessage);
+        setMessage(successMessage);
+      } else {
+        clearSettingsFeedback();
+        setMessage('Google Drive is not connected yet.');
+      }
     } catch (error) {
-      setSyncStatus((prev) =>
-        prev
-          ? {
-              ...prev,
-              state: 'error',
-              phase: 'idle',
-              current_item: null,
-              last_error: error instanceof Error ? error.message : 'Unable to load Google Drive status',
-            }
-          : prev,
-      );
+      setDriveStatusResolved(false);
+      setSettingsError(error instanceof Error ? error.message : 'Unable to load Google Drive status');
       setMessage(error instanceof Error ? error.message : 'Unable to load Google Drive status');
     } finally {
       setDriveStatusBusy(false);
@@ -2245,7 +2323,9 @@ export default function App() {
       for (let attempt = 0; attempt < 30; attempt += 1) {
         const status = await fetchGoogleDriveStatus().catch(() => null);
         if (status?.connected) {
+          setManualDriveConnectUrl(null);
           setDriveStatus(status);
+          setDriveStatusResolved(true);
           if (storagePreference.mode === 'local_and_drive') {
             setSyncStatus((prev) => ({
               enabled: prev?.enabled ?? true,
@@ -2261,27 +2341,23 @@ export default function App() {
             }));
             const sync = await runSyncNow();
             setSyncStatus(sync);
-            setMessage(describeSyncStatus(sync, status.folder_name || 'Notebook AI'));
+            const successMessage = describeSyncStatus(sync, status.folder_name || 'Notebook AI');
+            setSettingsSuccess(successMessage);
+            setMessage(successMessage);
           } else {
-            setMessage(`Google Drive connected (${status.folder_name || 'Notebook AI'}).`);
+            const successMessage = `Google Drive connected (${status.folder_name || 'Notebook AI'}).`;
+            setSettingsSuccess(successMessage);
+            setMessage(successMessage);
           }
           return;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1500));
       }
+      clearSettingsFeedback();
       setMessage('Finish Google Drive approval in your browser, then click Refresh status.');
     } catch (error) {
-      setSyncStatus((prev) =>
-        prev
-          ? {
-              ...prev,
-              state: 'error',
-              phase: 'idle',
-              current_item: null,
-              last_error: error instanceof Error ? error.message : 'Unable to start Drive mirroring',
-            }
-          : prev,
-      );
+      setDriveStatusResolved(false);
+      setSettingsError(error instanceof Error ? error.message : 'Unable to start Drive mirroring');
       setMessage(error instanceof Error ? error.message : 'Unable to start Drive mirroring');
     } finally {
       driveConnectPollingRef.current = false;
@@ -2290,12 +2366,93 @@ export default function App() {
   }
 
   async function handleConnectGoogleDrive() {
+    if (driveStatusBusy || driveDisconnectBusy) return;
+    setDriveStatusBusy(true);
+    clearSettingsFeedback();
+    setSettingsSuccess('Starting Google Drive connection...');
     try {
-      await openGoogleDriveConnect();
-      setMessage('Approve Google Drive access in your browser. Notebook AI will start mirroring automatically.');
+      const { url, browserOpened } = await openGoogleDriveConnect();
+      setManualDriveConnectUrl(url);
+      const nextMessage = browserOpened
+        ? 'Approve Google Drive access in your browser. Notebook AI will start mirroring automatically.'
+        : 'Browser did not open automatically. Use Open approval page below.';
+      setSettingsSuccess(nextMessage);
+      setMessage(nextMessage);
       void pollForDriveConnection();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to start Google Drive connection');
+      const message = error instanceof Error ? error.message : 'Unable to start Google Drive connection';
+      setSettingsError(message);
+      setMessage(message);
+      setDriveStatusBusy(false);
+      return;
+    }
+  }
+
+  async function handleDisconnectGoogleDrive() {
+    if (driveDisconnectBusy) return;
+    setDriveDisconnectBusy(true);
+    clearSettingsFeedback();
+    try {
+      const status = await disconnectGoogleDrive();
+      setManualDriveConnectUrl(null);
+      setDriveStatus(status);
+      setDriveStatusResolved(true);
+
+      if (storagePreference.mode === 'local_and_drive') {
+        const sync = await runSyncNow().catch(() => fetchSyncStatus().catch(() => null));
+        if (sync) {
+          setSyncStatus(sync);
+        }
+        const successMessage = 'Google Drive disconnected. Reconnect Drive to resume mirroring.';
+        setSettingsSuccess(successMessage);
+        setMessage(successMessage);
+        return;
+      }
+
+      const successMessage = 'Google Drive disconnected. Local-only storage remains active.';
+      setSettingsSuccess(successMessage);
+      setMessage(successMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to disconnect Google Drive';
+      setSettingsError(message);
+      setMessage(message);
+    } finally {
+      setDriveDisconnectBusy(false);
+    }
+  }
+
+  async function handleOpenManualDriveConnect() {
+    if (!manualDriveConnectUrl) return;
+    try {
+      if (window.notebookDesktop?.openExternal) {
+        await window.notebookDesktop.openExternal(manualDriveConnectUrl);
+      } else {
+        window.open(manualDriveConnectUrl, '_blank', 'noopener,noreferrer');
+      }
+      const nextMessage = 'Opened Google Drive approval in your default browser.';
+      setSettingsSuccess(nextMessage);
+      setMessage(nextMessage);
+    } catch (error) {
+      const nextMessage =
+        error instanceof Error && error.message
+          ? `Unable to open browser automatically: ${error.message}`
+          : 'Unable to open the Google Drive approval page automatically. Copy the link below.';
+      setSettingsError(nextMessage);
+      setMessage(nextMessage);
+    }
+  }
+
+  async function handleCopyManualDriveConnectUrl() {
+    if (!manualDriveConnectUrl) return;
+    try {
+      await navigator.clipboard.writeText(manualDriveConnectUrl);
+      const nextMessage = 'Copied the Google Drive approval link.';
+      setSettingsSuccess(nextMessage);
+      setMessage(nextMessage);
+    } catch {
+      const nextMessage = 'Unable to copy automatically. Select the URL below and open it in your browser.';
+      setSettingsError(nextMessage);
+      setMessage(nextMessage);
     }
   }
 
@@ -2865,6 +3022,39 @@ export default function App() {
     };
   }, []);
 
+  const effectiveDriveConnected =
+    driveStatus.connected || (!driveStatusResolved && isDriveMirrorLikelyConnected(syncStatus));
+
+  useEffect(() => {
+    if (
+      showSplash ||
+      !settingsOpen ||
+      !effectiveDriveConnected ||
+      !isDriveApprovalFeedback(settingsFeedback)
+    ) {
+      return;
+    }
+
+    const nextDriveFolderName = driveStatus.folder_name || 'Notebook AI';
+    const nextMessage =
+      storagePreference.mode === 'local_and_drive'
+        ? syncStatus
+          ? describeSyncStatus(syncStatus, nextDriveFolderName)
+          : `Drive mirror connected to ${nextDriveFolderName}.`
+        : `Google Drive connected (${nextDriveFolderName}).`;
+    setManualDriveConnectUrl(null);
+    setSettingsSuccess(nextMessage);
+    setMessage(nextMessage);
+  }, [
+    driveStatus.folder_name,
+    effectiveDriveConnected,
+    settingsFeedback,
+    settingsOpen,
+    showSplash,
+    storagePreference.mode,
+    syncStatus,
+  ]);
+
   if (showSplash) {
     return (
       <SplashScreen
@@ -2915,7 +3105,6 @@ export default function App() {
   const detailsTagLabel = tags.length === 1 ? '1 tag' : `${tags.length} tags`;
   const detailsContextLabel = CONTEXT_PRESET_LABELS[contextPreset];
 
-
   return (
     <main className={`app-shell${isMacPlatform ? ' is-mac' : ''}`} style={{ gridTemplateColumns: gridCols }}>
       <div className="ambient-bg" />
@@ -2926,6 +3115,7 @@ export default function App() {
           <NoteList
             notes={notes}
             folders={folders}
+            loadingWorkspace={workspaceBootstrapPending}
             selectedId={selectedId}
             selectedFolderId={selectedFolderId}
             selectedNoteIds={selectedNoteIds}
@@ -3383,9 +3573,11 @@ export default function App() {
         syncPendingOps={syncStatus?.pending_ops ?? 0}
         syncStatus={syncStatus}
         syncActionBusy={syncActionBusy}
-        driveConnected={driveStatus.connected}
+        driveConnected={effectiveDriveConnected}
         driveFolderName={driveStatus.folder_name || 'Notebook AI'}
         driveStatusBusy={driveStatusBusy}
+        driveDisconnectBusy={driveDisconnectBusy}
+        manualDriveConnectUrl={manualDriveConnectUrl}
         onStorageModeChange={(mode) => {
           void handleStorageModeChange(mode);
         }}
@@ -3407,6 +3599,15 @@ export default function App() {
         }}
         onRefreshDriveStatus={() => {
           void handleRefreshDriveStatus();
+        }}
+        onDisconnectDrive={() => {
+          void handleDisconnectGoogleDrive();
+        }}
+        onOpenManualDriveConnect={() => {
+          void handleOpenManualDriveConnect();
+        }}
+        onCopyManualDriveConnectUrl={() => {
+          void handleCopyManualDriveConnectUrl();
         }}
         transcriptionProvider={activeTranscriptionProvider}
         transcriptionModel={activeTranscriptionModel}

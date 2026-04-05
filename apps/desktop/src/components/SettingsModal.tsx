@@ -88,6 +88,8 @@ interface Props {
   driveConnected: boolean;
   driveFolderName: string;
   driveStatusBusy: boolean;
+  driveDisconnectBusy: boolean;
+  manualDriveConnectUrl: string | null;
   onStorageModeChange: (mode: 'local' | 'local_and_drive') => void;
   onChooseLocalFolder: () => void;
   onRunSyncNow: () => void;
@@ -106,6 +108,9 @@ interface Props {
   onMarkdownSettingsChange: (patch: Partial<Omit<MarkdownSettings, 'updated_at'>>) => void;
   onConnectDrive: () => void;
   onRefreshDriveStatus: () => void;
+  onDisconnectDrive: () => void;
+  onOpenManualDriveConnect: () => void;
+  onCopyManualDriveConnectUrl: () => void;
   buildVersion: string;
 }
 
@@ -184,6 +189,8 @@ export function SettingsModal({
   driveConnected,
   driveFolderName,
   driveStatusBusy,
+  driveDisconnectBusy,
+  manualDriveConnectUrl,
   onStorageModeChange,
   onChooseLocalFolder,
   onRunSyncNow,
@@ -200,6 +207,9 @@ export function SettingsModal({
   onMarkdownSettingsChange,
   onConnectDrive,
   onRefreshDriveStatus,
+  onDisconnectDrive,
+  onOpenManualDriveConnect,
+  onCopyManualDriveConnectUrl,
   buildVersion,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
@@ -212,6 +222,7 @@ export function SettingsModal({
   const selectedTranscriptionBrand = selectedTranscriptionModel
     ? inferBrandFromModel(selectedTranscriptionModel)
     : null;
+  const showDriveConnectionPanel = storageMode === 'local_and_drive' || driveConnected;
 
   if (!open) return null;
 
@@ -483,7 +494,7 @@ export function SettingsModal({
                       Choose Local Folder
                     </button>
                     <small title={localRootPath}>{localRootPath || 'No folder selected yet.'}</small>
-                    {storageMode === 'local_and_drive' ? (
+                    {showDriveConnectionPanel ? (
                       <div className="provider-chip" style={{ marginTop: '2px' }}>
                         <div className="provider-chip__title">
                           <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
@@ -502,7 +513,9 @@ export function SettingsModal({
                         </div>
                         <small>
                           {driveConnected
-                            ? `Mirroring to "${driveFolderName || 'Notebook AI'}".`
+                            ? storageMode === 'local_and_drive'
+                              ? `Mirroring to "${driveFolderName || 'Notebook AI'}".`
+                              : `Connected to "${driveFolderName || 'Notebook AI'}", but local-only storage is active.`
                             : 'Connect Drive to enable cloud mirror for transcripts.'}
                         </small>
                         {syncStatus ? (
@@ -515,6 +528,8 @@ export function SettingsModal({
                                   }`
                                 : syncActionBusy
                                   ? 'Starting Drive sync...'
+                                : driveDisconnectBusy
+                                  ? 'Disconnecting Google Drive...'
                                 : driveStatusBusy && !driveConnected
                                   ? 'Waiting for Google Drive approval in your browser.'
                                 : syncStatus.state === 'needs_setup'
@@ -549,12 +564,12 @@ export function SettingsModal({
                           </div>
                         ) : null}
                         <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                          {!driveConnected ? (
+                          {!driveConnected && storageMode === 'local_and_drive' ? (
                             <button
                               type="button"
                               className="cta-btn"
                               onClick={onConnectDrive}
-                              disabled={storageBusy || driveStatusBusy}
+                              disabled={storageBusy || driveStatusBusy || driveDisconnectBusy}
                               style={{ flex: 1, justifyContent: 'center' }}
                             >
                               <Link size={14} />
@@ -565,13 +580,52 @@ export function SettingsModal({
                             type="button"
                             className="ghost-btn"
                             onClick={onRefreshDriveStatus}
-                            disabled={storageBusy || driveStatusBusy}
+                            disabled={storageBusy || driveStatusBusy || driveDisconnectBusy}
                             style={{ flex: driveConnected ? 1 : undefined }}
                           >
                             <FolderSync size={14} />
                             {driveStatusBusy ? 'Refreshing...' : 'Refresh status'}
                           </button>
+                          {driveConnected ? (
+                            <button
+                              type="button"
+                              className="ghost-btn"
+                              onClick={onDisconnectDrive}
+                              disabled={storageBusy || driveStatusBusy || driveDisconnectBusy}
+                              style={{ flex: 1 }}
+                            >
+                              <Unplug size={14} />
+                              {driveDisconnectBusy ? 'Disconnecting...' : 'Disconnect Drive'}
+                            </button>
+                          ) : null}
                         </div>
+                        {!driveConnected && manualDriveConnectUrl ? (
+                          <div style={{ display: 'grid', gap: '8px', marginTop: '10px' }}>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <button
+                                type="button"
+                                className="ghost-btn"
+                                onClick={onOpenManualDriveConnect}
+                                disabled={storageBusy || driveDisconnectBusy}
+                                style={{ flex: 1 }}
+                              >
+                                <Link size={14} />
+                                Open approval page
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-btn"
+                                onClick={onCopyManualDriveConnectUrl}
+                                disabled={storageBusy || driveDisconnectBusy}
+                                style={{ flex: 1 }}
+                              >
+                                <Info size={14} />
+                                Copy link
+                              </button>
+                            </div>
+                            <small style={{ wordBreak: 'break-all' }}>{manualDriveConnectUrl}</small>
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                     {storageMode === 'local_and_drive' ? (

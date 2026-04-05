@@ -8,6 +8,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -17,7 +18,7 @@ from ..notes_store import NoteStore
 from ..storage_profile_store import StorageProfileStore
 from ..sync_state_store import FolderSyncRemoteState, NoteSyncRemoteState, SyncState, SyncStateStore
 
-log = logging.getLogger("notebook.local.drive_sync")
+log = logging.getLogger("notebook.sidecar.drive_sync")
 
 DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
@@ -131,6 +132,7 @@ class DriveSyncService:
             return
         if self._sync_task and not self._sync_task.done():
             return
+        log.info("Drive sync scheduled pending_ops=%s", self.sync_state_store.pending_ops())
         self._sync_task = asyncio.create_task(self.run_sync())
 
     async def run_sync(self) -> SyncStatus:
@@ -140,30 +142,38 @@ class DriveSyncService:
     async def run_sync_now(self) -> SyncStatus:
         task = self._sync_task
         if task and not task.done():
+            log.info("Drive sync already in progress; waiting for current run")
             return await task
+        log.info("Drive sync requested manually")
         self._sync_task = asyncio.create_task(self.run_sync())
         return await self._sync_task
 
     async def _run_sync_internal(self) -> SyncStatus:
         status = self.get_status()
+        log.info("Drive sync starting enabled=%s pending_ops=%s", status.enabled, status.pending_ops)
         if not status.enabled:
             return status
 
         desktop_access_token = self._desktop_access_token
         if not desktop_access_token:
+            log.info("Drive sync blocked: missing desktop session")
             return self.profile_store.mark_sync_needs_setup("Sign in again to resume Google Drive sync.")
 
         try:
+            log.info("Drive sync checking Drive connection via cloud API")
             drive_status = await self._fetch_drive_status(desktop_access_token)
         except Exception as exc:
-            return self.profile_store.mark_sync_error(str(exc))
+            log.exception("Drive sync failed while loading cloud status")
+            return self.profile_store.mark_sync_error(self._format_sync_error(exc, service_name="cloud API"))
 
         if not drive_status.get("connected"):
+            log.info("Drive sync needs setup: Google Drive is not connected")
             return self.profile_store.mark_sync_needs_setup(
                 "Connect Google Drive to start mirroring your local workspace."
             )
 
         try:
+            log.info("Drive sync requesting Drive access token from cloud API")
             drive_access = await self._fetch_drive_access_token(desktop_access_token)
             folder_name = str(
                 drive_access.get("folder_name")
@@ -177,6 +187,13 @@ class DriveSyncService:
                 folder_name=folder_name,
             )
             state = self.sync_state_store.get_state()
+            log.info(
+                "Drive sync ready mode=%s folder_name=%s folder_id=%s pending_ops=%s",
+                "full_reconcile" if state.queue.full_reconcile_reason else "incremental",
+                folder_name,
+                folder_id,
+                state.pending_ops(),
+            )
             if state.queue.full_reconcile_reason:
                 final_status = await self._run_full_reconcile(
                     drive_access_token=str(drive_access["access_token"]),
@@ -187,13 +204,19 @@ class DriveSyncService:
                     drive_access_token=str(drive_access["access_token"]),
                     folder_id=folder_id,
                     state=state,
-                )
+            )
             if final_status.pending_ops > 0:
                 self.schedule_if_needed()
+            log.info(
+                "Drive sync completed state=%s pending_ops=%s last_synced_at=%s",
+                final_status.state,
+                final_status.pending_ops,
+                final_status.last_synced_at,
+            )
             return final_status
         except Exception as exc:
             log.exception("Drive sync failed")
-            return self.profile_store.mark_sync_error(str(exc))
+            return self.profile_store.mark_sync_error(self._format_sync_error(exc))
 
     async def _run_full_reconcile(
         self,
@@ -214,6 +237,13 @@ class DriveSyncService:
         deleted_folder_ids = self.profile_store.deleted_folder_ids()
 
         total_items = 1 + len(set(self.note_store_note_ids()).union(remote_notes)) + len(self.profile_store.deleted_note_ids())
+        log.info(
+            "Drive sync full reconcile items=%s remote_notes=%s deleted_notes=%s deleted_folders=%s",
+            total_items,
+            len(remote_notes),
+            len(self.profile_store.deleted_note_ids()),
+            len(deleted_folder_ids),
+        )
         self.profile_store.mark_sync_started(total_items=max(total_items, 1))
 
         completed_items = 0
@@ -389,6 +419,13 @@ class DriveSyncService:
             len(state.queue.note_upserts)
             + len(state.queue.note_deletes)
             + (1 if state.queue.folders_dirty else 0)
+        )
+        log.info(
+            "Drive sync incremental items=%s note_upserts=%s note_deletes=%s folders_dirty=%s",
+            total_items,
+            len(state.queue.note_upserts),
+            len(state.queue.note_deletes),
+            state.queue.folders_dirty,
         )
         if total_items <= 0:
             self._update_pending_ops()
@@ -668,6 +705,24 @@ class DriveSyncService:
     def note_store_note_ids(self) -> set[str]:
         return {note.frontmatter.id for note in self.note_store.list_notes()}
 
+    def _format_sync_error(self, exc: Exception, *, service_name: str | None = None) -> str:
+        if isinstance(exc, httpx.RequestError):
+            host = exc.request.url.host if exc.request else None
+            cloud_host = urlparse(self.settings.cloud_api_url).hostname
+            resolved_service = service_name
+            if resolved_service is None:
+                if host == "www.googleapis.com":
+                    resolved_service = "Google Drive API"
+                elif cloud_host and host == cloud_host:
+                    resolved_service = "cloud API"
+                else:
+                    resolved_service = "remote service"
+
+            host_detail = f" ({host})" if host else ""
+            return f"Unable to reach {resolved_service}{host_detail}: {exc}"
+
+        return str(exc)
+
     async def _fetch_drive_status(self, desktop_access_token: str) -> dict[str, Any]:
         response = await self._cloud_request(
             "GET",
@@ -705,6 +760,7 @@ class DriveSyncService:
         desktop_access_token: str,
         json_body: object | None = None,
     ) -> httpx.Response:
+        log.debug("Drive sync cloud request method=%s path=%s", method, path)
         async with httpx.AsyncClient(timeout=20.0, transport=self.transport) as client:
             response = await client.request(
                 method,
@@ -726,6 +782,7 @@ class DriveSyncService:
         content: bytes | None = None,
         json_body: object | None = None,
     ) -> httpx.Response:
+        log.debug("Drive sync drive request method=%s url=%s", method, url)
         req_headers = {
             "Authorization": f"Bearer {drive_access_token}",
             **(headers or {}),

@@ -12,6 +12,7 @@ interface DesktopAppInfo {
   buildVersion: string;
   isPackaged: boolean;
   platform: string;
+  cloudApiUrl: string;
 }
 
 contextBridge.exposeInMainWorld('notebookDesktop', {

@@ -85,6 +85,9 @@
     },
     "notebookCloudDebug": {
       "value": false
+    },
+    "containerAppMinReplicas": {
+      "value": 0
     }
   }
 }

@@ -194,6 +194,19 @@ def test_storage_and_drive_status():
     assert workspace.json()["storage_mode"] == "local_and_drive"
     assert workspace.json()["drive_folder_id"] == "folder-2"
 
+    disconnected = client.post("/integrations/google-drive/disconnect", headers=_auth_headers(session))
+    assert disconnected.status_code == 200
+    assert disconnected.json()["connected"] is False
+    assert disconnected.json()["folder_id"] is None
+
+    drive_status_after = client.get("/integrations/google-drive/status", headers=_auth_headers(session))
+    assert drive_status_after.status_code == 200
+    assert drive_status_after.json()["connected"] is False
+
+    disconnected_again = client.delete("/integrations/google-drive", headers=_auth_headers(session))
+    assert disconnected_again.status_code == 200
+    assert disconnected_again.json()["connected"] is False
+
 
 def test_openai_provider_models_filters_copilot_models():
     def handler(request: httpx.Request) -> httpx.Response:

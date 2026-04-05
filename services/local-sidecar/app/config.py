@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Annotated
 
 from pydantic import field_validator
@@ -8,7 +9,11 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 def _read_repo_version() -> str:
-    version_file = Path(__file__).resolve().parents[3] / "VERSION"
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        version_file = Path(meipass) / "VERSION"
+    else:
+        version_file = Path(__file__).resolve().parents[3] / "VERSION"
     try:
         return version_file.read_text(encoding="utf-8").strip() or "0.1.0"
     except OSError:

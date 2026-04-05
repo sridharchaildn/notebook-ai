@@ -100,6 +100,10 @@ param googleDriveDefaultFolderName string = ''
 @description('Enable verbose API logs (NOTEBOOK_CLOUD_DEBUG).')
 param notebookCloudDebug bool = false
 
+@description('Minimum Container App replicas to keep warm.')
+@minValue(0)
+param containerAppMinReplicas int = 0
+
 var normalizedPrefix = toLower(replace(namePrefix, '-', ''))
 var uniqueSuffix = toLower(uniqueString(subscription().id, resourceGroup().id, namePrefix))
 var containerRegistryName = take('${normalizedPrefix}${uniqueSuffix}', 50)
@@ -393,7 +397,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
         }
       ]
       scale: {
-        minReplicas: 0
+        minReplicas: containerAppMinReplicas
         maxReplicas: 3
         rules: [
           {
