@@ -47,6 +47,9 @@ jobs:
       - name: Sync versions
         run: npm run version:sync
 
+      - name: Vendor workspace packages for SWA
+        run: node scripts/swa-vendor-web-packages.mjs
+
       - name: Validate web build
         run: npm run build:web
 
