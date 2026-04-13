@@ -60,6 +60,11 @@ function main() {
 
   writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
 
+  // npm can leave stale `packages["node_modules/@notebook-ai/..."].resolved` entries
+  // pointing at file:../../packages/*; Oryx's `npm install --production` follows those and fails.
+  rmSync(path.join(webRoot, 'node_modules'), { recursive: true, force: true });
+  rmSync(path.join(webRoot, 'package-lock.json'), { force: true });
+
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const r = spawnSync(
     npm,
@@ -68,6 +73,12 @@ function main() {
   );
   if (r.status !== 0) {
     throw new Error(`npm install in apps/web exited with ${r.status}`);
+  }
+
+  const lockPath = path.join(webRoot, 'package-lock.json');
+  const lockText = readFileSync(lockPath, 'utf8');
+  if (lockText.includes('file:../../packages/')) {
+    throw new Error(`${lockPath} still references file:../../packages/ after fresh install`);
   }
 }
 

@@ -12,6 +12,7 @@ on:
       - 'apps/web/**'
       - 'packages/**'
       - '.github/workflows/web-deploy.yml'
+      - 'scripts/swa-vendor-web-packages.mjs'
   pull_request:
     types: [opened, synchronize, reopened, closed]
     branches:
@@ -23,6 +24,7 @@ on:
       - 'apps/web/**'
       - 'packages/**'
       - '.github/workflows/web-deploy.yml'
+      - 'scripts/swa-vendor-web-packages.mjs'
 
 jobs:
   build_and_deploy_job:
