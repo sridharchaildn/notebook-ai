@@ -26,7 +26,6 @@ export default function AuthCallbackPage() {
 
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');
-        const intent = params.get('intent') === 'signup' ? 'signup' : 'signin';
         const supabase = getSupabaseClient();
 
         if (code) {
@@ -44,7 +43,7 @@ export default function AuthCallbackPage() {
 
         setStage('done');
         setStatus('Sign in complete. Redirecting...');
-        router.replace(intent === 'signin' ? '/home' : '/onboarding');
+        router.replace('/home');
       } catch (err) {
         setError(errorMessage(err, 'Unable to complete sign in.'));
       }

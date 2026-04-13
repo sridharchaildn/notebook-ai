@@ -252,6 +252,24 @@ function desktopBuildVersion(): string {
   return process.env.NOTEBOOK_BUILD_VERSION?.trim() || app.getVersion();
 }
 
+function resolvePackagedBinary(paths: string[]): string | null {
+  for (const candidate of paths) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      try {
+        fs.chmodSync(candidate, 0o755);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
 function getDesktopAppInfo(): DesktopAppInfo {
   return {
     version: app.getVersion(),
@@ -616,16 +634,28 @@ async function startSidecar() {
   };
 
   const bundledSidecar = process.platform === 'darwin'
-    ? path.join(process.resourcesPath, 'local-sidecar', 'notebook-ai-local-sidecar')
-    : path.join(process.resourcesPath, 'local-sidecar', 'notebook-ai-local-sidecar.exe');
+    ? resolvePackagedBinary([
+        path.join(process.resourcesPath, 'local-sidecar', 'notebook-ai-local-sidecar'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'local-sidecar', 'notebook-ai-local-sidecar'),
+      ])
+    : resolvePackagedBinary([
+        path.join(process.resourcesPath, 'local-sidecar', 'notebook-ai-local-sidecar.exe'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'local-sidecar', 'notebook-ai-local-sidecar.exe'),
+      ]);
   const bundledFfmpeg = process.platform === 'darwin'
-    ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg')
-    : path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe');
+    ? resolvePackagedBinary([
+        path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'ffmpeg', 'ffmpeg'),
+      ])
+    : resolvePackagedBinary([
+        path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'ffmpeg', 'ffmpeg.exe'),
+      ]);
   if (app.isPackaged) {
-    if (!fs.existsSync(bundledSidecar)) {
-      throw new Error(`Packaged sidecar binary not found: ${bundledSidecar}`);
+    if (!bundledSidecar) {
+      throw new Error(`Packaged sidecar binary not found under ${process.resourcesPath}`);
     }
-    if (fs.existsSync(bundledFfmpeg)) {
+    if (bundledFfmpeg && fs.existsSync(bundledFfmpeg)) {
       sidecarEnv.NOTEBOOK_LOCAL_FFMPEG_PATH = bundledFfmpeg;
     }
     sidecarProcess = spawn(bundledSidecar, [], {
@@ -810,6 +840,10 @@ function handleAuthCallbackUrl(rawUrl: string) {
 }
 
 function focusOrCreateMainWindow() {
+  if (!app.isReady()) {
+    return;
+  }
+
   const existing = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
   if (!existing) {
     createWindow();

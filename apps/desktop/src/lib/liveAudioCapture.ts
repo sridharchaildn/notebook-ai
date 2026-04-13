@@ -76,6 +76,7 @@ export interface LiveCaptureChunk {
   blob: Blob;
   startedAtMs: number;
   durationMs: number;
+  rms: number;
 }
 
 export interface LiveCaptureHandle {
@@ -246,6 +247,12 @@ export async function createLiveCaptureHandle(
     const startedAtMs = framesToMs(committedFrames, audioContext.sampleRate);
     const durationMs = framesToMs(monoSamples.length, audioContext.sampleRate);
     committedFrames += monoSamples.length;
+    let sumSquares = 0;
+    for (let index = 0; index < monoSamples.length; index += 1) {
+      const sample = monoSamples[index] ?? 0;
+      sumSquares += sample * sample;
+    }
+    const rms = monoSamples.length > 0 ? Math.sqrt(sumSquares / monoSamples.length) : 0;
 
     const resampled = resampleAudioFrames(
       monoSamples,
@@ -257,6 +264,7 @@ export async function createLiveCaptureHandle(
       blob,
       startedAtMs,
       durationMs,
+      rms,
     });
   };
 

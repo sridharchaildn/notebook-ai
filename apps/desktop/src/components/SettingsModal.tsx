@@ -143,12 +143,17 @@ function describeProviderConnection(entry: ProviderConnection): string {
     return 'No local key saved on this device.';
   }
 
-  const viaLabel = entry.via === 'api_key' ? 'API key' : entry.via;
+  const viaLabel =
+    entry.via === 'api_key'
+      ? 'API key'
+      : entry.via === 'oauth'
+        ? 'managed credential'
+        : entry.via;
   const scopeLabel =
     entry.scope === 'desktop_local'
       ? 'stored locally on this device'
       : entry.scope === 'account_vault'
-        ? 'stored in your encrypted account vault'
+        ? 'managed outside the desktop app'
         : 'source unavailable';
 
   return `Connected via ${viaLabel}; ${scopeLabel}.`;
@@ -268,10 +273,8 @@ export function SettingsModal({
             <>
               <h3>Connected Providers</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', margin: '0 0 12px' }}>
-                Desktop AI keys are stored locally on this device. They are not synced to your
-                account, and if you uninstall the app or move devices you will need to enter them
-                again. Keys set in the sidecar <code style={{ fontSize: '0.75rem' }}>.env</code> also
-                count as local device credentials.
+                Desktop uses local AI keys on this device only. If you uninstall the app or move to
+                another machine, you will need to add them again. Keys set in the sidecar <code style={{ fontSize: '0.75rem' }}>.env</code> also count as local device credentials.
               </p>
               <div className="provider-status-grid">
                 {providers.map((entry) => (
@@ -313,8 +316,7 @@ export function SettingsModal({
 
               <h3>Bring Your Own Key</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', margin: '0 0 12px' }}>
-                Save a provider key locally for this desktop install only. Web and future mobile apps
-                use the encrypted account vault instead.
+                Save a provider key locally for this desktop install only.
               </p>
               <div className="byok-form">
                 <label>
@@ -744,6 +746,32 @@ export function SettingsModal({
                 <small>
                   Language and vocabulary hints are stored locally and applied to live transcription.
                 </small>
+
+                <label className="settings-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={transcriptionPreferences.auto_generate_summary}
+                    onChange={(event) =>
+                      onTranscriptionPreferencesChange({
+                        auto_generate_summary: event.target.checked,
+                      })
+                    }
+                  />
+                  <span>Auto-generate summary when recording stops</span>
+                </label>
+
+                <label className="settings-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={transcriptionPreferences.low_latency_mode}
+                    onChange={(event) =>
+                      onTranscriptionPreferencesChange({
+                        low_latency_mode: event.target.checked,
+                      })
+                    }
+                  />
+                  <span>Low-latency mode (faster updates, skips long silent chunks)</span>
+                </label>
               </div>
             </>
           )}

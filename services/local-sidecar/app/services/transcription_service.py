@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -416,7 +417,7 @@ class TranscriptionService:
                 recoverable=True,
             )
 
-        text = _extract_chat_message_text(message).strip()
+        text = _sanitize_transcript_text(_extract_chat_message_text(message))
         log.info("transcribe_llm: ok text_len=%s", len(text))
         return TranscriptionResult(
             text=text,
@@ -533,7 +534,7 @@ class TranscriptionService:
                         continue
 
                     resp_payload = response.json()
-                    text = str(resp_payload.get("text") or "").strip()
+                    text = _sanitize_transcript_text(str(resp_payload.get("text") or ""))
                     log.info(
                         "transcribe_whisper: ok model=%s text_len=%s",
                         model,
@@ -754,3 +755,26 @@ def _extract_chat_message_text(message: dict[str, Any]) -> str:
                     parts.append(t)
         return "".join(parts)
     return ""
+
+
+def _sanitize_transcript_text(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    # Strip known instruction leakage fragments that some models can emit
+    # during low-signal audio windows (long silence/gaps).
+    patterns = (
+        r"(?i)\bcontext:\s*use the user-provided context to improve wording and punctuation only\.?\s*",
+        r"(?i)\buse the user-provided context to improve wording and punctuation only\.?\s*",
+        r"(?i)\bexpected spoken languages:\s*[a-z,\s-]{0,120}\.?\s*",
+        r"(?i)\bexpected spoken languages\b\.?\s*",
+        r"(?i)\bexpected to be used in english\.?\s*",
+        r"(?i)\bexpected (spoken )?language(?:s)?\s*:\s*[a-z,\s-]{0,120}\.?\s*",
+        r"(?i)\bif you see expected spoken languages\b\.?\s*",
+    )
+    cleaned = text
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned)
+
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
+    return cleaned

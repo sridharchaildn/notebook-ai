@@ -17,6 +17,7 @@ interface Props {
   status: string;
   elapsedMs?: number;
   warning?: string | null;
+  lowLatencyEnabled?: boolean;
   contextPreset?: NoteContextPreset;
   contextText?: string;
   onStart: (options: TranscriptionStartOptions) => void;
@@ -30,6 +31,7 @@ export function TranscriptionPanel({
   status,
   elapsedMs = 0,
   warning = null,
+  lowLatencyEnabled = false,
   contextPreset,
   contextText,
   onStart,
@@ -108,6 +110,7 @@ export function TranscriptionPanel({
             <span className={`status-dot${recording ? ' live' : ''}`} />
             {recording ? `Recording ${elapsedLabel}` : 'Ready'}
           </div>
+          {lowLatencyEnabled ? <span className="status-pill">Low latency</span> : null}
           <button
             type="button"
             className="ghost-btn ghost-btn--compact toggle-expand-btn collapse-toggle-btn"

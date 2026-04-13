@@ -74,6 +74,8 @@ export interface TranscriptionPreferences {
   main_language: string;
   spoken_languages: string[];
   custom_vocabulary: string[];
+  auto_generate_summary: boolean;
+  low_latency_mode: boolean;
   updated_at?: string | null;
 }
 
@@ -156,6 +158,7 @@ export interface CaptureSessionStartRequest {
   model?: string | null;
   context_preset?: NoteContextPreset | null;
   context_text?: string | null;
+  initial_transcript?: string | null;
 }
 
 export interface CaptureSessionStatus {

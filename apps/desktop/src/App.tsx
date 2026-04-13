@@ -50,6 +50,7 @@ import { SyncStatusBanner } from './components/SyncStatusBanner';
 import { TagEditor } from './components/TagEditor';
 import { TranscriptSessionView } from './components/TranscriptSessionView';
 import { TranscriptionPanel } from './components/TranscriptionPanel';
+import { ModelPicker, providerLabel } from './components/ProviderModelPicker';
 import {
   appendCaptureSessionChunk,
   authInvalidEventName,
@@ -108,6 +109,8 @@ import {
 const DEFAULT_BODY = 'Start typing...';
 const DELETE_UNDO_MS = 5000;
 const CAPTURE_CHUNK_MS = 8000;
+const CAPTURE_CHUNK_MS_LOW_LATENCY = 3000;
+const CAPTURE_SILENCE_RMS_THRESHOLD = 0.006;
 const INTERVIEW_TRANSCRIPT_TAIL_CHARS = 5000;
 const COACH_PLACEHOLDER = 'Waiting for a new interviewer question...';
 const DEFAULT_DRIVE_STATUS: DriveConnectionStatus = {
@@ -310,6 +313,8 @@ export default function App() {
     main_language: 'auto',
     spoken_languages: [],
     custom_vocabulary: [],
+    auto_generate_summary: true,
+    low_latency_mode: false,
     updated_at: null,
   });
   const [markdownSettings, setMarkdownSettings] = useState<MarkdownSettings>({
@@ -742,6 +747,10 @@ export default function App() {
     const pendingNoteId = autoEnhanceNoteIdRef.current;
     if (!pendingNoteId) return;
     if (recording || transcriptionBusy) return;
+    if (!transcriptionPreferences.auto_generate_summary) {
+      autoEnhanceNoteIdRef.current = null;
+      return;
+    }
     if (!selectedNote || selectedNote.frontmatter.id !== pendingNoteId) return;
     if (!['transcript', 'interview_assist'].includes(selectedNote.kind)) return;
     if (!body.trim() && !interviewTranscriptRef.current.trim()) return;
@@ -758,6 +767,7 @@ export default function App() {
     copilotProvider,
     recording,
     selectedNote,
+    transcriptionPreferences.auto_generate_summary,
     transcriptionBusy,
   ]);
 
@@ -958,6 +968,8 @@ export default function App() {
                   main_language: 'auto',
                   spoken_languages: [],
                   custom_vocabulary: [],
+                  auto_generate_summary: true,
+                  low_latency_mode: false,
                   updated_at: null,
                 }) as TranscriptionPreferences,
             ),
@@ -1781,6 +1793,9 @@ export default function App() {
       main_language: patch.main_language ?? transcriptionPreferences.main_language,
       spoken_languages: patch.spoken_languages ?? transcriptionPreferences.spoken_languages,
       custom_vocabulary: patch.custom_vocabulary ?? transcriptionPreferences.custom_vocabulary,
+      auto_generate_summary:
+        patch.auto_generate_summary ?? transcriptionPreferences.auto_generate_summary,
+      low_latency_mode: patch.low_latency_mode ?? transcriptionPreferences.low_latency_mode,
     };
     setTranscriptionPreferences((prev) => ({ ...prev, ...next }));
     try {
@@ -2565,11 +2580,12 @@ export default function App() {
     setRecording(false);
     setCapturePhase('stopping');
     setInterviewGuidanceBusy(false);
-    setTranscriptionBusy(true);
+    // Fast-stop UX: return controls immediately while finalize continues.
+    setTranscriptionBusy(false);
+    setMessage('Finalizing transcript in background...');
     const sessionId = captureSessionIdRef.current;
     if (!sessionId) {
       stopCaptureTracks();
-      setTranscriptionBusy(false);
       setCapturePhase('idle');
       return;
     }
@@ -2670,8 +2686,17 @@ export default function App() {
       audioContext,
       inputNode,
       sourceHint,
-      chunkDurationMs: CAPTURE_CHUNK_MS,
+      chunkDurationMs: transcriptionPreferences.low_latency_mode
+        ? CAPTURE_CHUNK_MS_LOW_LATENCY
+        : CAPTURE_CHUNK_MS,
       onChunk: async (chunk: LiveCaptureChunk) => {
+        if (
+          transcriptionPreferences.low_latency_mode &&
+          chunk.durationMs >= 1200 &&
+          chunk.rms < CAPTURE_SILENCE_RMS_THRESHOLD
+        ) {
+          return;
+        }
         const chunkIndex = nextChunkIndex;
         nextChunkIndex += 1;
         const ack = await appendCaptureSessionChunk(sessionId, chunk.blob, chunkIndex, {
@@ -2773,55 +2798,73 @@ export default function App() {
       createSourceRecorderHandles,
     } = options;
 
+    const continuingExistingNote = Boolean(
+      selectedNote &&
+      (sessionMode === 'interview_assist'
+        ? selectedNote.kind === 'interview_assist'
+        : isTranscriptNote(selectedNote)),
+    );
+
     sessionModeRef.current = sessionMode;
     captureActiveRef.current = true;
     setActiveSessionMode(sessionMode);
     captureStopRequestedRef.current = false;
     captureFinalizeInFlightRef.current = false;
-    interviewTranscriptRef.current = '';
-    interviewTurnsRef.current = [];
-    interviewDigestRef.current = '';
-    lastCoachedInterviewerTurnIdRef.current = null;
     coachInFlightRequestIdRef.current += 1;
-    interviewGuidanceRef.current = '';
-    shouldAutoScrollInterviewRef.current = true;
-    setShowJumpToLatest(false);
-    setCandidateMuted(false);
-    setInterviewTranscript('');
-    setInterviewTurns([]);
-    setInterviewGuidance('');
-    setInterviewGuidanceBusy(false);
-    setTranscriptSegments([]);
-    setBody('');
     setCaptureWarning(null);
     recordingStartedAtRef.current = Date.now();
     setRecordingElapsedMs(0);
 
-    const transcriptTitle =
-      sessionMode === 'interview_assist'
-        ? `Interview Assist ${new Date().toLocaleTimeString()}`
-        : `Transcript ${new Date().toLocaleTimeString()}`;
-    const created = await createNote({
-      title: transcriptTitle,
-      content: '',
-      tags: sessionMode === 'interview_assist' ? ['interview-assist', 'transcript'] : ['transcript'],
-      kind: sessionMode === 'interview_assist' ? 'interview_assist' : 'transcript',
-      content_format: 'plain_text',
-      context_preset: contextPreset,
-      context_text: normalizeNullableText(contextText),
-      session:
+    let targetNoteId = '';
+    let initialTranscript: string | null = null;
+
+    if (continuingExistingNote && selectedNote) {
+      targetNoteId = selectedNote.frontmatter.id;
+      initialTranscript = body.trim();
+      captureNoteIdRef.current = targetNoteId;
+      autoEnhanceNoteIdRef.current = targetNoteId;
+    } else {
+      interviewTranscriptRef.current = '';
+      interviewTurnsRef.current = [];
+      interviewDigestRef.current = '';
+      lastCoachedInterviewerTurnIdRef.current = null;
+      interviewGuidanceRef.current = '';
+      shouldAutoScrollInterviewRef.current = true;
+      setShowJumpToLatest(false);
+      setCandidateMuted(false);
+      setInterviewTranscript('');
+      setInterviewTurns([]);
+      setInterviewGuidance('');
+      setInterviewGuidanceBusy(false);
+      setTranscriptSegments([]);
+
+      const transcriptTitle =
         sessionMode === 'interview_assist'
-          ? buildInterviewSession('', '', [])
-          : buildTranscriptSession('', []),
-    });
-    setNotes((prev) => [created, ...prev]);
-    setSelectedId(created.frontmatter.id);
-    applyEditorStateFromNote(created);
-    autoEnhanceNoteIdRef.current = created.frontmatter.id;
-    captureNoteIdRef.current = created.frontmatter.id;
+          ? `Interview Assist ${new Date().toLocaleTimeString()}`
+          : `Transcript ${new Date().toLocaleTimeString()}`;
+      const created = await createNote({
+        title: transcriptTitle,
+        content: '',
+        tags: sessionMode === 'interview_assist' ? ['interview-assist', 'transcript'] : ['transcript'],
+        kind: sessionMode === 'interview_assist' ? 'interview_assist' : 'transcript',
+        content_format: 'plain_text',
+        context_preset: contextPreset,
+        context_text: normalizeNullableText(contextText),
+        session:
+          sessionMode === 'interview_assist'
+            ? buildInterviewSession('', '', [])
+            : buildTranscriptSession('', []),
+      });
+      setNotes((prev) => [created, ...prev]);
+      setSelectedId(created.frontmatter.id);
+      applyEditorStateFromNote(created);
+      targetNoteId = created.frontmatter.id;
+      captureNoteIdRef.current = created.frontmatter.id;
+      autoEnhanceNoteIdRef.current = created.frontmatter.id;
+    }
 
     const capturePayload: CaptureSessionStartRequest = {
-      note_id: created.frontmatter.id,
+      note_id: targetNoteId,
       session_mode: sessionMode,
       capture_mode: captureMode,
       provider: activeTranscriptionProvider,
@@ -2829,6 +2872,7 @@ export default function App() {
       model: activeTranscriptionModel || undefined,
       context_preset: contextPreset,
       context_text: normalizeNullableText(contextText),
+      initial_transcript: initialTranscript,
     };
     const captureSession = await startCaptureSession(capturePayload);
     captureSessionIdRef.current = captureSession.session_id;
@@ -2858,6 +2902,10 @@ export default function App() {
     sessionMode: CaptureSessionMode,
   ) {
     if (recording) return;
+    if (captureFinalizeInFlightRef.current) {
+      setMessage('Still finalizing previous recording...');
+      return;
+    }
     setCapturePhase('requesting_permissions');
     setCaptureWarning(null);
     setTranscriptionBusy(true);
@@ -3100,6 +3148,9 @@ export default function App() {
   const transcriptViewSegments = selectedNote?.frontmatter.id === selectedId
     ? transcriptSegments
     : (getTranscriptSession(selectedNote)?.segments ?? []);
+  const preRecordCopilotProviderValue = connectedProviders.includes(copilotProvider)
+    ? copilotProvider
+    : connectedProviders[0] ?? '';
   const showCopilotChat = showTranscriptNoteView || showInterviewNoteView;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
   const detailsTagLabel = tags.length === 1 ? '1 tag' : `${tags.length} tags`;
@@ -3286,6 +3337,7 @@ export default function App() {
               status={transcriptionStatus}
               elapsedMs={recordingElapsedMs}
               warning={captureWarning}
+              lowLatencyEnabled={transcriptionPreferences.low_latency_mode}
               contextPreset={contextPreset}
               contextText={contextText}
               onStart={(opts) => {
@@ -3324,7 +3376,80 @@ export default function App() {
               Create Note
             </button>
           </section>
-        ) : showInterviewNoteView ? (
+        ) : (
+          <>
+            {!showTranscriptNoteView && !showInterviewNoteView ? (
+              <section className="transcript-quick-setup">
+                <div className="transcript-session-view__tabs" role="tablist" aria-label="Transcript views">
+                  <button
+                    type="button"
+                    className={`ghost-btn ghost-btn--compact${transcriptViewTab === 'transcript' ? ' active' : ''}`}
+                    onClick={() => setTranscriptViewTab('transcript')}
+                  >
+                    Transcript
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost-btn ghost-btn--compact${transcriptViewTab === 'summary' ? ' active' : ''}`}
+                    onClick={() => setTranscriptViewTab('summary')}
+                  >
+                    Summary
+                  </button>
+                </div>
+                <div className="transcript-quick-setup__grid">
+                  <article className="transcript-quick-setup__card">
+                    <div className="transcript-quick-setup__card-header">
+                      <h4>Model</h4>
+                      <p>Choose audio and Copilot defaults before recording.</p>
+                    </div>
+                    <ModelPicker
+                      label="Audio model"
+                      value={activeTranscriptionModel}
+                      models={transcriptionModelOptions}
+                      loading={transcriptionModelsLoading}
+                      disabled={transcriptionModelOptions.length === 0 && !transcriptionModelsLoading}
+                      placeholder="Select an OpenAI audio model"
+                      onChange={setWhisperTranscriptionModel}
+                    />
+                    {transcriptionModelsError ? (
+                      <p className="transcript-quick-setup__error">{transcriptionModelsError}</p>
+                    ) : null}
+                    <label className="transcript-quick-setup__field">
+                      <span className="transcript-quick-setup__label">Copilot provider</span>
+                      <select
+                        className="transcript-quick-setup__select"
+                        value={preRecordCopilotProviderValue}
+                        disabled={connectedProviders.length === 0}
+                        onChange={(event) => setCopilotProvider(event.target.value as ProviderId)}
+                      >
+                        {connectedProviders.length === 0 ? (
+                          <option value="">Connect a provider in Settings</option>
+                        ) : (
+                          connectedProviders.map((provider) => (
+                            <option key={provider} value={provider}>
+                              {providerLabel[provider]}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                    <ModelPicker
+                      label="Copilot model"
+                      value={copilotModel}
+                      models={copilotModelOptions}
+                      loading={copilotModelsLoading}
+                      disabled={copilotModelOptions.length === 0 && !copilotModelsLoading}
+                      placeholder="Select a Copilot model"
+                      onChange={setCopilotModel}
+                    />
+                    {copilotModelsError ? (
+                      <p className="transcript-quick-setup__error">{copilotModelsError}</p>
+                    ) : null}
+                  </article>
+                </div>
+              </section>
+            ) : null}
+            {showInterviewNoteView ? (
           <section className="interview-chat-screen" aria-live="polite">
             <header className="interview-chat-header">
               <div className="interview-chat-header__title">
@@ -3431,7 +3556,7 @@ export default function App() {
               <div ref={interviewBottomSentinelRef} className="interview-thread-bottom-sentinel" />
             </div>
           </section>
-        ) : showTranscriptNoteView ? (
+            ) : showTranscriptNoteView ? (
           <TranscriptSessionView
             title={title}
             transcript={transcriptViewText}
@@ -3458,7 +3583,7 @@ export default function App() {
             onTabChange={setTranscriptViewTab}
             onSummaryChange={setNoteSummary}
           />
-        ) : showMarkdownPreview ? (
+            ) : showMarkdownPreview ? (
           <section className="note-preview-panel">
             <header className="note-preview-panel__header">
               <h3>Markdown Preview</h3>
@@ -3466,8 +3591,10 @@ export default function App() {
             </header>
             <MarkdownPreview content={body} />
           </section>
-        ) : (
+            ) : (
           <RichMarkdownEditor value={body} onChange={setBody} placeholder="Write your thoughts here..." />
+            )}
+          </>
         )}
       </section>
 

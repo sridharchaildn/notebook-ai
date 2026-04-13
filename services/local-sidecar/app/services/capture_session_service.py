@@ -168,12 +168,13 @@ class CaptureSessionService:
             "model": payload.model,
             "context_preset": payload.context_preset,
             "context_text": payload.context_text,
+            "transcript_seed": (payload.initial_transcript or "").strip(),
             "state": "recording",
             "accepted_chunk_index": -1,
             "pending_retry_count": 0,
             "recoverable_error": False,
             "detail": None,
-            "transcript": "",
+            "transcript": (payload.initial_transcript or "").strip(),
             "segments": [],
             "chunks": [],
             "started_at": now,
@@ -558,7 +559,7 @@ class CaptureSessionService:
         )
 
     def _refresh_manifest_derived_fields(self, manifest: dict[str, Any]) -> None:
-        transcript = ""
+        transcript = str(manifest.get("transcript_seed") or "").strip()
         for record in self._canonical_records(manifest):
             transcript = _merge_transcript_text(transcript, str(record.get("transcript_text") or ""))
         manifest["transcript"] = transcript

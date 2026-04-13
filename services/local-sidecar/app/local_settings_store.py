@@ -26,6 +26,8 @@ class LocalSettingsStore:
             main_language=str(payload.get("main_language") or "auto"),
             spoken_languages=_normalize_list(payload.get("spoken_languages")),
             custom_vocabulary=_normalize_list(payload.get("custom_vocabulary")),
+            auto_generate_summary=bool(payload.get("auto_generate_summary", True)),
+            low_latency_mode=bool(payload.get("low_latency_mode", False)),
             updated_at=_parse_datetime(updated_at),
         )
 
@@ -39,6 +41,8 @@ class LocalSettingsStore:
             "main_language": payload.main_language.strip() or "auto",
             "spoken_languages": _normalize_list(payload.spoken_languages),
             "custom_vocabulary": _normalize_list(payload.custom_vocabulary),
+            "auto_generate_summary": bool(payload.auto_generate_summary),
+            "low_latency_mode": bool(payload.low_latency_mode),
             "updated_at": updated_at,
         }
         self._write_payload(current)

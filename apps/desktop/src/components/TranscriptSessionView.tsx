@@ -103,7 +103,7 @@ export function TranscriptSessionView({
             onClick={() => setQuickSetupOpen((prev) => !prev)}
           >
             <Settings2 size={14} />
-            Quick setup
+            Model
           </button>
           {onToggleControls ? (
             <button type="button" className="ghost-btn ghost-btn--compact" onClick={onToggleControls}>

@@ -75,6 +75,7 @@ class CaptureSessionStartRequest(BaseModel):
     model: str | None = None
     context_preset: NoteContextPreset | None = None
     context_text: str | None = None
+    initial_transcript: str | None = None
 
 
 class CaptureSessionStatus(BaseModel):
@@ -312,6 +313,8 @@ class TranscriptionPreferences(BaseModel):
     main_language: str = "auto"
     spoken_languages: list[str] = Field(default_factory=list)
     custom_vocabulary: list[str] = Field(default_factory=list)
+    auto_generate_summary: bool = True
+    low_latency_mode: bool = False
     updated_at: datetime | None = None
 
 
@@ -319,6 +322,8 @@ class TranscriptionPreferencesUpdateRequest(BaseModel):
     main_language: str = "auto"
     spoken_languages: list[str] = Field(default_factory=list)
     custom_vocabulary: list[str] = Field(default_factory=list)
+    auto_generate_summary: bool = True
+    low_latency_mode: bool = False
 
 
 class MarkdownSettings(BaseModel):

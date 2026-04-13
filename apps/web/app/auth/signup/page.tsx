@@ -70,10 +70,8 @@ export default function SignUpPage() {
     setLoading(true);
     setMessage('');
     try {
-      const currentUser = await getCurrentSupabaseUser();
-      const next = new URLSearchParams();
-      if (currentUser.email) next.set('email', currentUser.email);
-      router.push(`/onboarding?${next.toString()}`);
+      await getCurrentSupabaseUser();
+      router.push('/home');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to create account.');
     } finally {
@@ -99,7 +97,7 @@ export default function SignUpPage() {
             Create your account
           </h1>
           <p className="muted" style={{ margin: '0 0 24px', fontSize: '0.88rem', lineHeight: 1.6 }}>
-            Get started with Notebook AI and continue to onboarding.
+            Get started with Notebook AI and continue to the Mac app.
           </p>
 
           <div className="form-stack">

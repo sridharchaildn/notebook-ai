@@ -48,6 +48,8 @@ function buildSettingsModalProps() {
       main_language: 'auto',
       spoken_languages: [],
       custom_vocabulary: [],
+      auto_generate_summary: true,
+      low_latency_mode: false,
       updated_at: null,
     },
     onTranscriptionPreferencesChange: vi.fn(),
