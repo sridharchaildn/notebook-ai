@@ -1,6 +1,6 @@
 # Notebook AI Desktop — UI/UX Standards
 
-This file covers desktop UI/UX rules only. Repo-wide architecture and ownership rules live in the root [`AGENTS.md`](/Users/sridhar2901/git-personal/notebook-ai/AGENTS.md) and apply here first.
+This file covers desktop UI/UX rules only. Repo-wide architecture and ownership rules live in the root [`AGENTS.md`](../../AGENTS.md) and apply here first.
 
 This document defines the UI/UX standards, colors, typography, and component patterns for the Notebook AI desktop app. All future features and screens must follow these conventions to maintain visual consistency across both desktop and web apps.
 

@@ -299,6 +299,9 @@ export default function App() {
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [authPending, setAuthPending] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
+  const [guestMode, setGuestMode] = useState(false);
+  const guestModeRef = useRef(false);
+  const localWorkspaceReady = authReady && (Boolean(sessionUserId) || guestMode);
   const [manualSignInUrl, setManualSignInUrl] = useState<string | null>(null);
   const [manualDriveConnectUrl, setManualDriveConnectUrl] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
@@ -531,13 +534,31 @@ export default function App() {
     setAuthPending(false);
     setManualSignInUrl(null);
     setSessionUserId(session?.userId ?? null);
-    setShowSplash(!session?.userId);
+    if (session?.userId) {
+      guestModeRef.current = false;
+      setGuestMode(false);
+      setShowSplash(false);
+      return;
+    }
+    if (!guestModeRef.current) {
+      setShowSplash(true);
+    }
   }
 
   function showSignedOutSplash(statusMessage: string) {
+    guestModeRef.current = false;
+    setGuestMode(false);
     syncRendererSessionState(null);
     setSettingsOpen(false);
     setMessage(statusMessage);
+  }
+
+  function handleContinueWithoutAccount() {
+    guestModeRef.current = true;
+    setGuestMode(true);
+    setShowSplash(false);
+    setAuthPending(false);
+    setMessage('Local workspace. API keys stay on this machine.');
   }
 
   function applyRendererSession(session: DesktopRendererSession | null) {
@@ -786,7 +807,13 @@ export default function App() {
         setBuildVersion(appInfo?.buildVersion ?? appInfo?.version ?? '0.1.0');
         setSessionUserId(session?.userId ?? null);
         setAuthPending(Boolean(!session?.userId && pendingAuthFlow));
-        setShowSplash(!session?.userId);
+        if (session?.userId) {
+          guestModeRef.current = false;
+          setGuestMode(false);
+          setShowSplash(false);
+        } else if (!guestModeRef.current) {
+          setShowSplash(true);
+        }
       } finally {
         if (!disposed) {
           setAuthReady(true);
@@ -896,7 +923,7 @@ export default function App() {
   }, [authReady, sessionUserId]);
 
   useEffect(() => {
-    if (!authReady || !sessionUserId) return;
+    if (!localWorkspaceReady) return;
 
     let disposed = false;
     setWorkspaceBootstrapPending(true);
@@ -921,12 +948,18 @@ export default function App() {
         ]);
         if (disposed) return;
 
+        let nextPreference = pref;
+        if (!sessionUserId && pref.mode !== 'local') {
+          nextPreference = await updateStoragePreference('local');
+        }
+        if (disposed) return;
+
         let nextNotes = loadedNotes;
         setFolders(loadedFolders);
         mergeProviderStatuses(providerStatuses);
-        setStoragePreference(pref);
-        setLocalRootPath(pref.local_root || localRoot);
-        setSyncStatus(sync);
+        setStoragePreference(nextPreference);
+        setLocalRootPath(nextPreference.local_root || localRoot);
+        setSyncStatus(sessionUserId ? sync : null);
 
         let first = nextNotes[0];
         if (first) {
@@ -959,9 +992,11 @@ export default function App() {
             loadedTranscriptionPreferences,
             loadedMarkdownSettings,
           ] = await Promise.all([
-            fetchGoogleDriveStatus()
-              .then((status) => ({ status, resolved: true }))
-              .catch(() => ({ status: null, resolved: false })),
+            sessionUserId
+              ? fetchGoogleDriveStatus()
+                  .then((status) => ({ status, resolved: true }))
+                  .catch(() => ({ status: null, resolved: false }))
+              : Promise.resolve({ status: null, resolved: true }),
             fetchTranscriptionPreferences().catch(
               () =>
                 ({
@@ -1005,14 +1040,20 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [authReady, sessionUserId]);
+  }, [localWorkspaceReady, sessionUserId]);
 
   useEffect(() => {
-    if (authReady && sessionUserId) return;
+    if (sessionUserId || guestMode) {
+      if (!sessionUserId) {
+        setDriveStatus(DEFAULT_DRIVE_STATUS);
+        setDriveStatusResolved(false);
+      }
+      return;
+    }
     setWorkspaceBootstrapPending(false);
     setDriveStatus(DEFAULT_DRIVE_STATUS);
     setDriveStatusResolved(false);
-  }, [authReady, sessionUserId]);
+  }, [guestMode, sessionUserId]);
 
   useEffect(() => {
     if (connectedProviders.length === 0) return;
@@ -1022,18 +1063,17 @@ export default function App() {
   }, [connectedProviders, copilotProvider]);
 
   useEffect(() => {
-    if (!authReady || !sessionUserId) return;
+    if (!localWorkspaceReady) return;
     if (!connectedProviders.includes(copilotProvider)) return;
     void loadProviderModels(copilotProvider, 'copilot');
-  }, [authReady, sessionUserId, connectedProviders, copilotProvider]);
+  }, [localWorkspaceReady, connectedProviders, copilotProvider]);
 
   useEffect(() => {
-    if (!authReady || !sessionUserId) return;
+    if (!localWorkspaceReady) return;
     if (!connectedProviders.includes('openai')) return;
     void loadProviderModels(activeTranscriptionProvider, 'transcription');
   }, [
-    authReady,
-    sessionUserId,
+    localWorkspaceReady,
     connectedProviders,
     activeTranscriptionProvider,
   ]);
@@ -2226,6 +2266,11 @@ export default function App() {
   }
 
   async function handleStorageModeChange(mode: StoragePreference['mode']) {
+    if (mode === 'local_and_drive' && !sessionUserId) {
+      setSettingsError('Sign in to mirror notes with Google Drive.');
+      setMessage('Sign in to mirror notes with Google Drive.');
+      return;
+    }
     setStorageBusy(true);
     clearSettingsFeedback();
     try {
@@ -2278,6 +2323,8 @@ export default function App() {
       setAuthPending(false);
       setManualSignInUrl(null);
       setManualDriveConnectUrl(null);
+      guestModeRef.current = false;
+      setGuestMode(false);
       setShowSplash(true);
       setSettingsOpen(false);
       setMessage('Signed out successfully.');
@@ -3109,6 +3156,7 @@ export default function App() {
         onLogin={() => {
           void handleStartDesktopSignIn();
         }}
+        onContinueLocally={handleContinueWithoutAccount}
         onReturnToApp={() => setShowSplash(false)}
         onLogout={() => {
           void handleLogout();

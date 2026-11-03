@@ -31,7 +31,5 @@ mkdir -p "$DIST_DIR" "$TMP_DIR"
   --hidden-import uvicorn.protocols.websockets.auto \
   "$ROOT/services/local-sidecar/run_sidecar.py"
 
-if [[ -n "${FFMPEG_BINARY:-}" ]]; then
-  cp "$FFMPEG_BINARY" "$DIST_DIR/ffmpeg"
-  chmod +x "$DIST_DIR/ffmpeg"
-fi
+# Do not copy ffmpeg into the release. Homebrew ffmpeg is typically GPL.
+# The sidecar uses an ffmpeg binary on PATH when one is installed.

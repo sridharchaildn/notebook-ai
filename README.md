@@ -2,7 +2,9 @@
 
 Desktop-first AI note taker with a local-first Electron UX, a Next.js web app, and FastAPI/LangChain backends.
 
-Licensed under the [MIT License](./LICENSE).
+Licensed under the [MIT License](./LICENSE). Third-party programs are listed in [NOTICE](./NOTICE).
+
+You can open the desktop app and keep notes on this machine without an account. Sign in only when you want Google Drive mirror or the web account vault.
 
 ## Architecture
 
@@ -44,7 +46,7 @@ A **sidecar** here is a small **local HTTP service** you run next to the desktop
 - **Notes:** Create, list, and save markdown through the sidecar so content stays on your filesystem and the UI does not depend on a remote service for every edit.
 - **AI and transcription:** Streaming transforms and audio round-trips go to the sidecar on `localhost`, which talks to provider APIs using keys from the sidecar `.env` or keys saved locally by the desktop app on that device.
 
-The **cloud API** is a separate companion: Supabase auth validation, session refresh/logout, web/mobile provider vault storage, storage preferences, desktop auth handoff, and Drive integration metadata. It does **not** store your note markdown or sit in the path for debounced note persistence.
+The **cloud API** is a separate companion: Supabase auth validation, session refresh/logout, web/mobile provider vault storage, storage preferences, desktop auth handoff, and Drive integration metadata. It does **not** store your note markdown or sit in the path for debounced note persistence. Desktop notes, local provider keys, transcription, and AI work without signing in. Google Drive mirror and the web vault require an account.
 
 Credential scope is intentionally split:
 - Desktop BYOK is stored locally on the device through `services/local-sidecar` and is not synced to the account vault.
@@ -58,33 +60,28 @@ Credential scope is intentionally split:
 - Unified web + desktop visual system with shared tokens/components
 - Dark and light themes with persisted preference
 
-## Quick Start
+## Get started
 
-1. Install workspace dependencies:
-   - `npm install`
-2. Create Python envs for each service and install dependencies:
-   - `cd services/local-sidecar && python3.11 -m venv .venv && source .venv/bin/activate && pip install -e .'[dev]'`
-   - `cd services/cloud-api && python3.11 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]'`
-3. Run services (requires a `.venv` in each service from step 2 so npm uses **Python ≥3.11**, not the system `python3`—e.g. Xcode’s 3.9 will fail on type hints):
-   - From repo root: `npm run dev:sidecar` (8787) and `npm run dev:cloud` (8790) in separate terminals, or `npm run dev:services` for both with reload. Scripts call `services/*/ .venv/bin/python` (macOS/Linux).
-   - **Windows:** from each service directory run `.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8787` (or `8790` for cloud-api).
-   - Or activate a venv and run `uvicorn app.main:app --reload --port 8787` / `--port 8790` (omit `--reload` during long live capture if you prefer).
-4. Run web app:
-   - `npm run dev:web`
-5. Run desktop app:
-   - `npm run dev:desktop`
+Follow [Getting started](./docs/getting-started.md) to install dependencies, run the desktop app without an account, and optionally start the cloud API.
+
+The public Mac download will live on the domain you attach. Set `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` to that URL when the domain is ready. Until then, **Download for Mac** opens the GitHub latest release.
 
 ## Setup Guides
 
+- [Getting started](./docs/getting-started.md)
 - [Supabase, Google Sign-In, and Google Drive Setup](./docs/supabase-google-setup.md)
+- [macOS desktop release](./docs/desktop-release-macos.md)
 
 ## Environment
 
-See `.env.example` in:
-- `services/local-sidecar`
-- `services/cloud-api`
-- `apps/desktop`
-- `apps/web`
+Copy the placeholder file and leave secrets empty:
+
+- [`services/local-sidecar/.env.example`](services/local-sidecar/.env.example)
+- [`services/cloud-api/.env.example`](services/cloud-api/.env.example)
+- [`apps/desktop/.env.example`](apps/desktop/.env.example)
+- [`apps/web/.env.example`](apps/web/.env.example)
+
+Do not commit `.env` files. Audio transcoding uses `ffmpeg` on your `PATH` when it is installed. Releases do not bundle ffmpeg.
 
 ## Versioning And Releases
 

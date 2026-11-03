@@ -2,6 +2,7 @@ import { BookOpen, Sparkles } from 'lucide-react';
 
 interface Props {
   onLogin: () => void;
+  onContinueLocally?: (() => void) | null;
   onReturnToApp?: (() => void) | null;
   onLogout?: (() => void) | null;
   onMagicLinkEmailChange: (value: string) => void;
@@ -20,6 +21,7 @@ interface Props {
 
 export function SplashScreen({
   onLogin,
+  onContinueLocally = null,
   onReturnToApp = null,
   onLogout = null,
   onMagicLinkEmailChange,
@@ -120,6 +122,17 @@ export function SplashScreen({
                 Send Magic Link
               </button>
             </div>
+
+            <button
+              type="button"
+              className="splash-secondary-btn splash-local-btn"
+              onClick={() => onContinueLocally?.()}
+            >
+              Continue without an account
+            </button>
+            <p className="splash-local-hint">
+              Notes and API keys stay on this machine. Sign in later for Google Drive.
+            </p>
           </>
         )}
 

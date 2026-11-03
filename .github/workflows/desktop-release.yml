@@ -3,17 +3,8 @@ name: desktop-release
 on:
   workflow_dispatch:
   push:
-    branches:
-      - master
-    paths:
-      - 'VERSION'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'apps/desktop/**'
-      - 'packages/**'
-      - 'services/local-sidecar/**'
-      - 'scripts/release/**'
-      - '.github/workflows/desktop-release.yml'
+    tags:
+      - 'v*'
 
 # electron-builder publish → GitHub Releases needs contents write (default token is often read-only)
 permissions:
@@ -21,6 +12,7 @@ permissions:
 
 jobs:
   package:
+    if: github.repository == 'sridharchaildn/notebook-ai'
     runs-on: macos-14
     environment: production-desktop
     env:
@@ -55,21 +47,17 @@ jobs:
           services/local-sidecar/.venv/bin/python -m pip install --upgrade pip
           services/local-sidecar/.venv/bin/python -m pip install -e './services/local-sidecar[dev]' pyinstaller
 
-      - name: Install ffmpeg
-        run: brew install ffmpeg
-
-      - id: ffmpeg
-        name: Resolve ffmpeg path
-        run: echo "path=$(which ffmpeg)" >> "$GITHUB_OUTPUT"
-
       - id: build_version
         name: Compute build version
-        run: echo "value=$(cat VERSION)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(cat VERSION)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Package local sidecar resources
         run: bash scripts/release/build-local-sidecar-macos.sh
-        env:
-          FFMPEG_BINARY: ${{ steps.ffmpeg.outputs.path }}
 
       - name: Import Apple signing certificate
         if: ${{ env.APPLE_SIGNING_READY == 'true' }}

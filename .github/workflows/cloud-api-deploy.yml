@@ -49,6 +49,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.repository == 'sridharchaildn/notebook-ai'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

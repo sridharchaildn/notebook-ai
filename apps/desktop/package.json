@@ -2,6 +2,7 @@
   "name": "@notebook-ai/desktop",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Notebook AI desktop app (Electron)",
   "author": "Notebook AI",
   "main": "dist-electron/main.js",
