@@ -1,0 +1,13 @@
+Notebook AI
+Copyright (c) 2026 Notebook AI contributors
+
+This project is licensed under the MIT License. See the LICENSE file.
+
+Third-party programs
+--------------------
+
+Public releases do not bundle ffmpeg. Audio transcoding uses an ffmpeg
+binary already installed on the system PATH. ffmpeg is a separate project.
+Builds of ffmpeg are often licensed under the GNU GPL or GNU LGPL, depending
+on the compile options. Installing ffmpeg is optional and does not change
+the MIT license of this source tree.

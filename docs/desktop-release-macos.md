@@ -223,13 +223,23 @@ If your org forbids elevating the token in workflows, create a **Personal Access
 
 ## 8) How CI runs (summary)
 
-On **push to `master`** when paths match (desktop, packages, sidecar, release scripts, `VERSION`, lockfiles, or this workflow), or when you **Run workflow** manually (**Actions** → **desktop-release** → **Run workflow**):
+On a **`v*` tag**, or when you **Run workflow** manually (**Actions** → **desktop-release** → **Run workflow**):
 
-1. `npm ci`, desktop tests, sidecar PyInstaller + ffmpeg  
-2. Import `.p12` on the runner (if signing secrets are set)  
-3. Write API `.p8` to a temp path (if notary API secrets are set)  
-4. `scripts/release/package-desktop-macos.sh` → `npm run package:mac` on workspace `@notebook-ai/desktop` (local **electron** + **electron-builder**)  
-5. Upload `apps/desktop/release/*.dmg` as artifact; draft GitHub release if publish is enabled  
+1. `npm ci`, desktop tests, sidecar PyInstaller. The DMG does not bundle ffmpeg; install ffmpeg on the Mac that runs transcription if a recording needs transcoding.
+2. Import `.p12` on the runner (if signing secrets are set)
+3. Write API `.p8` to a temp path (if notary API secrets are set)
+4. `scripts/release/package-desktop-macos.sh` → `npm run package:mac` on workspace `@notebook-ai/desktop` (local **electron** + **electron-builder**)
+5. Upload `apps/desktop/release/*.dmg` as artifact; draft GitHub release if publish is enabled
+
+To inspect a packaged app, launch it from Terminal:
+
+```bash
+NOTEBOOK_LOCAL_DEBUG=true "/Applications/Notebook AI.app/Contents/MacOS/Notebook AI"
+```
+
+Local sidecar health is `curl -s http://127.0.0.1:8787/health`. `Failed to fetch` while saving an API key means the desktop app is talking to a sidecar it did not start. Free port 8787 and launch with `npm run dev:desktop`, as described in [Getting started](./getting-started.md). Drive sync errors name either the cloud API host or `www.googleapis.com`.
+
+After a release is published, point the public download domain at the DMG and set `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` to that URL for the web deploy. The landing page **Download for Mac** button uses that variable.
 
 **Note:** Step `if:` conditions cannot use the `secrets` context in GitHub Actions; this workflow uses **job-level `env` flags** (`APPLE_SIGNING_READY`, `APPLE_NOTARY_API_READY`) instead.
 
@@ -237,8 +247,8 @@ On **push to `master`** when paths match (desktop, packages, sidecar, release sc
 
 ## 9) Run and verify a release
 
-1. Push a change that touches the workflow’s `paths`, or merge to `master`.
-2. **Actions** → **desktop-release** → open the latest run.
+1. Push a `v*` tag, or run **Actions** → **desktop-release** → **Run workflow**.
+2. Open that workflow run.
 3. Confirm **Build DMG** completes (signing + notarization + publish).
 4. Download the **artifact** or open the **GitHub Release** draft.
 5. On a clean Mac: open the DMG, run the app, confirm Gatekeeper behavior and permissions (mic / screen capture if used).

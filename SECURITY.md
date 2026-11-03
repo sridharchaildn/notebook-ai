@@ -8,7 +8,7 @@ Security fixes land on `master` first and are shipped forward into release branc
 
 Do not open public GitHub issues for exploitable security problems.
 
-Email the maintainers with:
+Report them through [GitHub private vulnerability reporting](https://github.com/sridharchaildn/notebook-ai/security/advisories/new) for this repository. Include:
 
 - affected surface (`apps/desktop`, `services/local-sidecar`, `apps/web`, `services/cloud-api`)
 - reproduction steps

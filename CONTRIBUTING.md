@@ -1,5 +1,9 @@
 # Contributing
 
+## Secrets
+
+Never commit `.env`, `.env.local`, credentials, or Apple signing material. Start from the `.env.example` files and keep real values on your machine. Pull request CI does not receive production secrets.
+
 ## Branch Naming
 
 - `feat/<slug>`
@@ -38,6 +42,8 @@ Allowed categories:
 - tagged releases use an exact semver from `VERSION`.
 
 ## Validation
+
+Pull requests run `.github/workflows/ci.yml`: desktop tests, a web build with placeholder public env values, and pytest for both Python services. Deploy and signed macOS release workflows run only in this repository.
 
 Run the relevant checks before merging:
 

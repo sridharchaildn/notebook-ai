@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "notebook-ai-local-sidecar"
 version = "0.1.0"
 description = "Local FastAPI sidecar for Notebook AI"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116.0",

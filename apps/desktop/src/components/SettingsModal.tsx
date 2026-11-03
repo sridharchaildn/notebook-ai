@@ -316,7 +316,7 @@ export function SettingsModal({
 
               <h3>Bring Your Own Key</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', margin: '0 0 12px' }}>
-                Save a provider key locally for this desktop install only.
+                Account features are optional. API keys stay on this machine.
               </p>
               <div className="byok-form">
                 <label>
@@ -446,7 +446,11 @@ export function SettingsModal({
                       Account
                     </span>
                   </div>
-                  <small>{sessionUserId ? 'Desktop session active.' : 'Not signed in yet.'}</small>
+                  <small>
+                    {sessionUserId
+                      ? 'Desktop session active. Google Drive mirror is available.'
+                      : 'Account features are optional. API keys stay on this machine.'}
+                  </small>
                   {sessionUserId ? (
                     <div style={{ marginTop: '8px' }}>
                       <button
@@ -469,7 +473,11 @@ export function SettingsModal({
                       Transcript Storage
                     </span>
                   </div>
-                  <small>Choose local-only or local + Google Drive mirror.</small>
+                  <small>
+                    {sessionUserId
+                      ? 'Choose local-only or local + Google Drive mirror.'
+                      : 'Sign in to mirror notes with Google Drive. API keys stay on this machine.'}
+                  </small>
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
                     <button
                       type="button"
@@ -484,7 +492,7 @@ export function SettingsModal({
                       type="button"
                       className={`settings-tab${storageMode === 'local_and_drive' ? ' active' : ''}`}
                       onClick={() => onStorageModeChange('local_and_drive')}
-                      disabled={storageBusy}
+                      disabled={storageBusy || !sessionUserId}
                       style={{ flex: 1, justifyContent: 'center' }}
                     >
                       Local + Drive

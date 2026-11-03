@@ -15,14 +15,6 @@ if (fs.existsSync(sidecarBinary)) {
   });
 }
 
-const ffmpegBinary = path.join(distSidecar, 'ffmpeg');
-if (fs.existsSync(ffmpegBinary)) {
-  extraResources.push({
-    from: ffmpegBinary,
-    to: 'ffmpeg/ffmpeg',
-  });
-}
-
 export default {
   appId: 'ai.notebook.desktop',
   productName: 'Notebook AI',
