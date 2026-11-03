@@ -226,13 +226,24 @@ if [[ -z "$ACR_LOGIN_SERVER" ]]; then
   exit 1
 fi
 
-echo "Step 2/3a: Importing base image into ACR (avoids Docker Hub anonymous rate limit on acr build)..."
-az acr import \
+# Docker Hub rejects anonymous pulls once the shared rate limit is hit.
+# Public ECR mirrors the official Python image and is what ACR import should use.
+BASE_IMAGE="${BASE_IMAGE:-python:3.11-slim}"
+BASE_IMAGE_SOURCE="${BASE_IMAGE_SOURCE:-public.ecr.aws/docker/library/python:3.11-slim}"
+
+echo "Step 2/3a: Ensuring ${BASE_IMAGE} is in ACR (source: ${BASE_IMAGE_SOURCE})..."
+if az acr repository show \
   --subscription "$AZ_SUBSCRIPTION_ID" \
   --name "$ACR_NAME" \
-  --source docker.io/library/python:3.11-slim \
-  --image python:3.11-slim \
-  --force
+  --image "$BASE_IMAGE" >/dev/null 2>&1; then
+  echo "Base image already present in ACR: ${BASE_IMAGE}"
+else
+  az acr import \
+    --subscription "$AZ_SUBSCRIPTION_ID" \
+    --name "$ACR_NAME" \
+    --source "$BASE_IMAGE_SOURCE" \
+    --image "$BASE_IMAGE"
+fi
 
 echo "Step 2/3b: Building and pushing app image (repo root context)..."
 az acr build \

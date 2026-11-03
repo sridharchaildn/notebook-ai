@@ -1,5 +1,5 @@
-# Empty REGISTRY_PREFIX = pull from Docker Hub (local builds). Set to "<acr>.azurecr.io/" for ACR cloud
-# build after `az acr import` of library/python:3.11-slim (avoids Docker Hub anonymous rate limits).
+# Empty REGISTRY_PREFIX = pull from Docker Hub (local builds). Cloud deploys set it to
+# "<acr>.azurecr.io/" after importing public.ecr.aws/docker/library/python:3.11-slim.
 ARG REGISTRY_PREFIX=
 FROM ${REGISTRY_PREFIX}python:3.11-slim
 

@@ -1,7 +1,9 @@
 /**
- * Azure Static Web Apps repackages `apps/web` without the monorepo root, so
- * `file:../../packages/*` deps break on Oryx's `npm install --production`.
- * Copy workspace packages under apps/web and rewrite those deps to local paths.
+ * Azure Static Web Apps builds `apps/web` without the monorepo root, so
+ * `file:../../packages/*` deps cannot be installed there. Copy workspace
+ * packages under apps/web and rewrite those deps to local paths for the build.
+ * `swa-prepare-production-package.mjs` runs after `next build` and removes the
+ * file: deps before Oryx's production install.
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
