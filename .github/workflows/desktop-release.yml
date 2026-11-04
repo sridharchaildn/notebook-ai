@@ -80,6 +80,7 @@ jobs:
         env:
           NOTEBOOK_BUILD_VERSION: ${{ steps.build_version.outputs.value }}
           NOTEBOOK_DESKTOP_PUBLISH: always
+          NOTEBOOK_DESKTOP_RELEASE_TYPE: ${{ github.ref_type == 'tag' && 'release' || 'draft' }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_API_KEY: ${{ steps.notarization_api_key.outputs.key_path }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}

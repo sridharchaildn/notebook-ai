@@ -229,7 +229,7 @@ On a **`v*` tag**, or when you **Run workflow** manually (**Actions** → **desk
 2. Import `.p12` on the runner (if signing secrets are set)
 3. Write API `.p8` to a temp path (if notary API secrets are set)
 4. `scripts/release/package-desktop-macos.sh` → `npm run package:mac` on workspace `@notebook-ai/desktop` (local **electron** + **electron-builder**)
-5. Upload `apps/desktop/release/*.dmg` as artifact; draft GitHub release if publish is enabled
+5. Upload `apps/desktop/release/*.dmg` as an artifact. A `v*` tag publishes a GitHub Release. A manual run stays a draft.
 
 To inspect a packaged app, launch it from Terminal:
 
@@ -250,7 +250,7 @@ After a release is published, point the public download domain at the DMG and se
 1. Push a `v*` tag, or run **Actions** → **desktop-release** → **Run workflow**.
 2. Open that workflow run.
 3. Confirm **Build DMG** completes (signing + notarization + publish).
-4. Download the **artifact** or open the **GitHub Release** draft.
+4. Download the **artifact**. For a `v*` tag, open the published **GitHub Release**. A manual run stays a draft.
 5. On a clean Mac: open the DMG, run the app, confirm Gatekeeper behavior and permissions (mic / screen capture if used).
 
 ---
