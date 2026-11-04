@@ -59,12 +59,25 @@ jobs:
       - name: Package local sidecar resources
         run: bash scripts/release/build-local-sidecar-macos.sh
 
-      - name: Import Apple signing certificate
+      - id: import_certs
+        name: Import Apple signing certificate
         if: ${{ env.APPLE_SIGNING_READY == 'true' }}
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Point codesign at the imported keychain
+        if: ${{ env.APPLE_SIGNING_READY == 'true' }}
+        run: |
+          KEYCHAIN_PATH="$(security list-keychains | tr -d '"' | awk '/signing_temp/ { print $1; exit }')"
+          if [[ -z "$KEYCHAIN_PATH" || ! -f "$KEYCHAIN_PATH" ]]; then
+            echo "signing keychain was not created" >&2
+            security list-keychains >&2
+            exit 1
+          fi
+          echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ steps.import_certs.outputs.keychain-password }}" >> "$GITHUB_ENV"
 
       - id: notarization_api_key
         name: Prepare App Store Connect API key
@@ -76,6 +89,7 @@ jobs:
           echo "key_path=$KEY_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Build DMG
+        timeout-minutes: 40
         run: bash scripts/release/package-desktop-macos.sh
         env:
           NOTEBOOK_BUILD_VERSION: ${{ steps.build_version.outputs.value }}

@@ -9,6 +9,30 @@ const extraResources = [];
 
 const releaseType = process.env.NOTEBOOK_DESKTOP_RELEASE_TYPE === 'release' ? 'release' : 'draft';
 
+// electron-builder's native unpacker hangs on GitHub macOS runners after it
+// downloads the Electron zip. The electron package has already extracted the
+// same runtime, so point the packager at that directory and skip the unpacker.
+function resolveElectronDist() {
+  const candidates = [
+    process.env.NOTEBOOK_ELECTRON_DIST?.trim(),
+    path.join(repoRoot, 'node_modules', 'electron', 'dist'),
+    path.join(__dirname, 'node_modules', 'electron', 'dist'),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (
+      fs.existsSync(path.join(candidate, 'Electron.app')) ||
+      fs.existsSync(path.join(candidate, 'electron.exe'))
+    ) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+const electronDist = resolveElectronDist();
+
 const sidecarBinary = path.join(distSidecar, 'notebook-ai-local-sidecar');
 if (fs.existsSync(sidecarBinary)) {
   extraResources.push({
@@ -20,6 +44,7 @@ if (fs.existsSync(sidecarBinary)) {
 export default {
   appId: 'ai.notebook.desktop',
   productName: 'Notebook AI',
+  ...(electronDist ? { electronDist } : {}),
   directories: {
     output: 'release',
     buildResources: 'assets',
