@@ -7,6 +7,8 @@ const repoRoot = path.resolve(__dirname, '../..');
 const distSidecar = path.join(repoRoot, 'dist-sidecar');
 const extraResources = [];
 
+const releaseType = process.env.NOTEBOOK_DESKTOP_RELEASE_TYPE === 'release' ? 'release' : 'draft';
+
 const sidecarBinary = path.join(distSidecar, 'notebook-ai-local-sidecar');
 if (fs.existsSync(sidecarBinary)) {
   extraResources.push({
@@ -47,7 +49,7 @@ export default {
       provider: 'github',
       owner: 'sridharchaildn',
       repo: 'notebook-ai',
-      releaseType: 'draft',
+      releaseType,
     },
   ],
 };
